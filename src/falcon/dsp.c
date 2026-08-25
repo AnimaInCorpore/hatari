@@ -237,7 +237,13 @@ void DSP_Run(int nHostCycles)
 
 	DSP_CyclesGlobalClockCounter = CyclesGlobalClockCounter;
 
-	save_cycles += nHostCycles * 2;
+	/* nHostCycles is already scaled to the DSP's clock : every caller applies
+	 * DSP_CPU_FREQ_RATIO to the cpu cycles before calling us (see newcpu.c and
+	 * blitter.c). Applying the ratio a 2nd time here gave the DSP 4 clocks per
+	 * cpu clock instead of 2, ie 32 MIPS instead of the Falcon's 16 : DSPBench
+	 * v3.0b measured exactly 200 % of a real Falcon on all 4 of its ALU/SRAM
+	 * tests, in every P/X/Y internal-external combination. */
+	save_cycles += nHostCycles;
 
 	if (dsp_core.running == 0)
 		return;
@@ -848,6 +854,46 @@ void DSP_SsiTransmit_SCK(void)
 #endif
 }
 
+/* Wait states charged for a cpu access to the DSP host port, resolved per
+ * direction and access size (the Falcon splits word/long accesses into byte
+ * cycles through the 8-bit translator; the CPU-visible cost is not linear in
+ * the byte count). Upstream charged 0 for the first byte and 4 for each byte
+ * after, which DSPBench v3.0b measures as 72-174 % of a real Falcon depending
+ * on the access pattern. This table was calibrated against DSPBench with the
+ * DSP clock fix applied: the emulator-side model MB/s = K/(C + W) fits every
+ * sweep point to <0.5 %, and these totals put the raw and TX tests on
+ * 93-103 % of hardware. The RX-loop family stays low (70-90 %): those loops
+ * demand near-zero wait states, i.e. the CE core over-charges the loops
+ * themselves (suspected: no posted-write overlap for STRam writes between IO
+ * reads). Do not compensate for that here -- it would break the TX family.
+ * CALIBRATION KNOBS, overridable from the environment: HATARI_DSP_WS_R1, _R2,
+ * _R4, _W1, _W2, _W4. See hatari.md. */
+static int DSP_HostPort_WS_Read[3]  = { 3, 7, 10 };	/* byte, word, long */
+static int DSP_HostPort_WS_Write[3] = { 4, 3, 7 };
+
+static void DSP_HostPortWaitState(bool write_access)
+{
+	static bool env_read = false;
+	int idx;
+
+	if (unlikely(!env_read))
+	{
+		static const char *names[6] = { "HATARI_DSP_WS_R1", "HATARI_DSP_WS_R2",
+			"HATARI_DSP_WS_R4", "HATARI_DSP_WS_W1", "HATARI_DSP_WS_W2",
+			"HATARI_DSP_WS_W4" };
+		int i;
+		const char *env;
+
+		env_read = true;
+		for (i = 0; i < 6; i++)
+			if ((env = getenv(names[i])) != NULL)
+				(i < 3 ? DSP_HostPort_WS_Read : DSP_HostPort_WS_Write)[i % 3] = atoi(env);
+	}
+
+	idx = nIoMemAccessSize == 4 ? 2 : nIoMemAccessSize - 1;
+	M68000_WaitState((write_access ? DSP_HostPort_WS_Write : DSP_HostPort_WS_Read)[idx]);
+}
+
 /**
  * Read access wrapper for ioMemTabFalcon (DSP Host port)
  * DSP Host interface port is accessed by the 68030 in Byte mode.
@@ -867,8 +913,8 @@ void DSP_HandleReadAccess(void)
 		/* this value prevents TOS from hanging in the DSP init code */
 		value = 0xff;
 #endif
-		if (multi_access == true)
-			M68000_WaitState(4);
+		if (multi_access == false)
+			DSP_HostPortWaitState(false);
 		multi_access = true;
 
 		Dprintf(("HWget_b(0x%08x)=0x%02x at 0x%08x\n", addr, value, m68k_getpc()));
@@ -893,8 +939,8 @@ void DSP_HandleWriteAccess(void)
 		Dprintf(("HWput_b(0x%08x,0x%02x) at 0x%08x\n", addr, value, m68k_getpc()));
 		dsp_core_write_host(addr-DSP_HW_OFFSET, value);
 #endif
-		if (multi_access == true)
-			M68000_WaitState(4);
+		if (multi_access == false)
+			DSP_HostPortWaitState(true);
 		multi_access = true;
 	}
 }
