@@ -72,6 +72,7 @@
 #endif
 
 #include <stdbool.h>
+#include <stdlib.h>
 
 #include "main.h"
 #include "dsp_core.h"
@@ -108,6 +109,25 @@ static uint32_t cur_inst;
 
 /* Counts the number of access to the external memory for one instruction */
 static uint16_t access_to_ext_memory;
+
+/* Extra cycles charged for JCLR/JSET on the peripheral (pp) space, ie the
+ * "poll a host interface flag" loop that every DSP<->CPU transfer is built
+ * from. Upstream charges 4 on top of the base 2 = 6 clocks. DSPBench v3.0b's
+ * RX ( 8b/bytes ) is bound by this loop, not by the host port wait states
+ * (it reads 70 % at every WS setting). CALIBRATION KNOB -- see hatari.md. */
+static int	dsp_jclr_pp_cycles = -1;
+
+static int DSP_JclrPpCycles(void)
+{
+	const char *env;
+
+	if (unlikely(dsp_jclr_pp_cycles < 0)) {
+		dsp_jclr_pp_cycles = 4;
+		if ((env = getenv("HATARI_DSP_JCLR_PP_CYC")) != NULL)
+			dsp_jclr_pp_cycles = atoi(env);
+	}
+	return dsp_jclr_pp_cycles;
+}
 
 /* DSP is in disasm mode ? */
 /* If yes, stack overflow, underflow and illegal instructions messages are not displayed */
@@ -2588,7 +2608,7 @@ static void dsp_jclr_pp(void)
 	value = read_memory(memspace, addr);
 	newaddr = read_memory_p(dsp_core.pc+1);
 
-	dsp_core.instr_cycle += 4;
+	dsp_core.instr_cycle += DSP_JclrPpCycles();
 
 	if ((value & (1<<numbit))==0) {
 		dsp_core.pc = newaddr;
@@ -2823,7 +2843,7 @@ static void dsp_jset_pp(void)
 	value = read_memory(memspace, addr);
 	newaddr = read_memory_p(dsp_core.pc+1);
 
-	dsp_core.instr_cycle += 4;
+	dsp_core.instr_cycle += DSP_JclrPpCycles();
 
 	if (value & (1<<numbit)) {
 		newpc = newaddr;
