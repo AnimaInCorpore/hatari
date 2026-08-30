@@ -97,7 +97,12 @@ static const struct Config_Tag configs_Screen[] =
 	{ "bForceMax", Bool_Tag, &ConfigureParams.Screen.bForceMax },
 	{ "nMaxWidth", Int_Tag, &ConfigureParams.Screen.nMaxWidth },
 	{ "nMaxHeight", Int_Tag, &ConfigureParams.Screen.nMaxHeight },
+	{ "nVidelBorderPad", Int_Tag, &ConfigureParams.Screen.nVidelBorderPad },
+	{ "bVidelHdbPixels", Bool_Tag, &ConfigureParams.Screen.bVidelHdbPixels },
+	{ "bCrtFilter", Bool_Tag, &ConfigureParams.Screen.bCrtFilter },
+	{ "nCrtShader", Int_Tag, &ConfigureParams.Screen.nCrtShader },
 	{ "nZoomFactor", Float_Tag, &ConfigureParams.Screen.nZoomFactor },
+	{ "fPixelAspect", Float_Tag, &ConfigureParams.Screen.fPixelAspect },
 	{ "bUseSdlRenderer", Bool_Tag, &ConfigureParams.Screen.bUseSdlRenderer },
 	{ "ScreenShotFormat", Int_Tag, &ConfigureParams.Screen.ScreenShotFormat },
 	{ "szScreenShotDir", String_Tag, ConfigureParams.Screen.szScreenShotDir },
@@ -766,6 +771,10 @@ void Configuration_SetDefault(void)
 	ConfigureParams.Screen.bResizable = true;
 	ConfigureParams.Screen.nFrameSkips = AUTO_FRAMESKIP_LIMIT;
 	ConfigureParams.Screen.bAllowOverscan = true;
+	ConfigureParams.Screen.nVidelBorderPad = 0;
+	ConfigureParams.Screen.bVidelHdbPixels = false;
+	ConfigureParams.Screen.bCrtFilter = true;
+	ConfigureParams.Screen.nCrtShader = CRT_SHADER_HYLLIAN;
 	ConfigureParams.Screen.nSpec512Threshold = 1;
 	ConfigureParams.Screen.bAspectCorrect = true;
 	ConfigureParams.Screen.nMonitorType = MONITOR_TYPE_RGB;
@@ -786,6 +795,7 @@ void Configuration_SetDefault(void)
 	ConfigureParams.Screen.bForceMax = false;
 	ConfigureParams.Screen.DisableVideo = false;
 	ConfigureParams.Screen.nZoomFactor = 1.0;
+	ConfigureParams.Screen.fPixelAspect = 1.0;
 	ConfigureParams.Screen.bUseSdlRenderer = true;
 	ConfigureParams.Screen.bUseVsync = false;
 #if HAVE_LIBPNG

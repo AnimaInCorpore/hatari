@@ -304,6 +304,13 @@ typedef enum
   MONITOR_TYPE_TV
 } MONITORTYPE;
 
+typedef enum
+{
+  CRT_SHADER_AUTO,
+  CRT_SHADER_EASYMODE,
+  CRT_SHADER_HYLLIAN
+} CRTSHADER;
+
 
 /* Screen configuration */
 typedef struct
@@ -326,6 +333,7 @@ typedef struct
   int ScreenShotFormat;
   char szScreenShotDir[FILENAME_MAX];
   float nZoomFactor;
+  float fPixelAspect;
   int nSpec512Threshold;
   int nVdiColors;
   int nVdiWidth;
@@ -333,6 +341,10 @@ typedef struct
   int nMaxWidth;
   int nMaxHeight;
   int nFrameSkips;
+  int nVidelBorderPad;
+  bool bVidelHdbPixels;
+  bool bCrtFilter;
+  CRTSHADER nCrtShader;
 } CNF_SCREEN;
 
 

@@ -10,6 +10,7 @@
 const char Screen_fileid[] = "Hatari screen.c";
 
 #include <assert.h>
+#include <string.h>
 
 #include "main.h"
 
@@ -22,6 +23,8 @@ const char Screen_fileid[] = "Hatari screen.c";
 #endif
 
 #include "configuration.h"
+#include "crt_easymode.h"
+#include "crt_hyllian.h"
 #include "control.h"
 #include "conv_gen.h"
 #include "conv_st.h"
@@ -61,16 +64,46 @@ static SDL_Rect STScreenRect;       /* screen size without statusbar */
 SDL_Window *sdlWindow;
 static SDL_Renderer *sdlRenderer;
 static SDL_Texture *sdlTexture;
+static uint32_t *sdlCrtPixels;
 static bool bUseSdlRenderer;            /* true when using SDL2 renderer */
 static bool bIsSoftwareRenderer;
 static int desktop_width, desktop_height;
+
+static CRTSHADER Screen_GetCrtShader(void)
+{
+	/* Hyllian is the default for every Falcon port.  EasyMode remains an
+	 * explicit opt-in for users who prefer its lighter 15 kHz presentation;
+	 * the legacy AUTO value follows the new default as well. */
+	if (ConfigureParams.Screen.nCrtShader == CRT_SHADER_EASYMODE)
+		return CRT_SHADER_EASYMODE;
+	return CRT_SHADER_HYLLIAN;
+}
 
 
 void Screen_UpdateRects(SDL_Surface *screen, int numrects, SDL_Rect *rects)
 {
 	if (bUseSdlRenderer)
 	{
-		SDL_UpdateTexture(sdlTexture, NULL, screen->pixels, screen->pitch);
+		if (ConfigureParams.Screen.bCrtFilter) {
+			int display_height = screen->h - Statusbar_GetHeight();
+			int row;
+			if (Screen_GetCrtShader() == CRT_SHADER_HYLLIAN)
+				CRT_Hyllian_Process(sdlCrtPixels, screen->pixels, screen->w,
+				                   display_height, screen->pitch);
+			else
+				CRT_EasyMode_Process(sdlCrtPixels, screen->pixels, screen->w,
+				                     display_height, screen->pitch);
+			/* Keep Hatari's status bar visible, but outside the CRT pass. */
+			for (row = display_height; row < screen->h; ++row)
+				memcpy(sdlCrtPixels + (size_t)row * screen->w,
+				       (const unsigned char *)screen->pixels +
+				       (size_t)row * screen->pitch,
+				       (size_t)screen->w * sizeof(uint32_t));
+			SDL_UpdateTexture(sdlTexture, NULL, sdlCrtPixels,
+			                  screen->w * (int)sizeof(uint32_t));
+		} else {
+			SDL_UpdateTexture(sdlTexture, NULL, screen->pixels, screen->pitch);
+		}
 		/* Need to clear the renderer context for certain accelerated cards */
 		if (!bIsSoftwareRenderer)
 			SDL_RenderClear(sdlRenderer);
@@ -118,6 +151,8 @@ static void Screen_FreeSDL2Resources(void)
 			SDL_FreeSurface(sdlscrn);
 		sdlscrn = NULL;
 	}
+	free(sdlCrtPixels);
+	sdlCrtPixels = NULL;
 	if (sdlRenderer)
 	{
 		SDL_DestroyRenderer(sdlRenderer);
@@ -393,6 +428,7 @@ bool Screen_SetVideoSize(int width, int height, bool bForceChange)
 	static bool bPrevInFullScreen;
 	int win_width, win_height;
 	float scale = 1.0;
+	float pixel_aspect;
 
 	/* Check if we really have to change the video mode: */
 	if (sdlscrn != NULL && sdlscrn->w == width && sdlscrn->h == height && !bForceChange)
@@ -415,13 +451,22 @@ bool Screen_SetVideoSize(int width, int height, bool bForceChange)
 
 	bUseSdlRenderer = ConfigureParams.Screen.bUseSdlRenderer && !bUseDummyMode;
 
+	/* Non-square pixel aspect ratio (--pixel-aspect): the Videl's pixel
+	 * clock and line rate need not put a square pixel on a 4:3 monitor, so
+	 * stretch horizontally on presentation only. The emulated framebuffer
+	 * keeps its native size -- this changes how it is shown, not what is
+	 * rendered, so screenshots and AVI capture are unaffected. */
+	pixel_aspect = ConfigureParams.Screen.fPixelAspect;
+	if (pixel_aspect <= 0.0f)
+		pixel_aspect = 1.0f;
+
 	/* SDL Video attributes: */
 	win_width = width;
 	win_height = height;
 	if (bUseSdlRenderer)
 	{
 		scale = ConfigureParams.Screen.nZoomFactor;
-		win_width *= scale;
+		win_width *= scale * pixel_aspect;
 		win_height *= scale;
 	}
 	if (bInFullScreen)
@@ -533,14 +578,16 @@ bool Screen_SetVideoSize(int width, int height, bool bForceChange)
 
 		if (bInFullScreen)
 #if ENABLE_SDL3
-			SDL_SetRenderLogicalPresentation(sdlRenderer, width,
+			SDL_SetRenderLogicalPresentation(sdlRenderer,
+							 (int)(width * pixel_aspect + 0.5f),
 							 height,
 							 SDL_LOGICAL_PRESENTATION_LETTERBOX);
 #else
-			SDL_RenderSetLogicalSize(sdlRenderer, width, height);
+			SDL_RenderSetLogicalSize(sdlRenderer,
+						 (int)(width * pixel_aspect + 0.5f), height);
 #endif
 		else
-			SDL_RenderSetScale(sdlRenderer, scale, scale);
+			SDL_RenderSetScale(sdlRenderer, scale * pixel_aspect, scale);
 
 		/* Force to black to stop side bar artifacts on 16:9 monitors. */
 		SDL_SetRenderDrawColor(sdlRenderer, 0, 0, 0, 255);
@@ -562,6 +609,12 @@ bool Screen_SetVideoSize(int width, int height, bool bForceChange)
 #endif
 
 		Screen_SetTextureScale(width, height, win_width, win_height, true);
+		if (ConfigureParams.Screen.bCrtFilter)
+		{
+			sdlCrtPixels = calloc((size_t)width * height, sizeof(uint32_t));
+			if (!sdlCrtPixels)
+				Main_ErrorExit("Could not allocate CRT filter buffer", "", -2);
+		}
 	}
 	else
 	{
