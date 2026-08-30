@@ -15,6 +15,8 @@ set(SOURCES
 	control.c
 	conv_gen.c
 	conv_st.c
+	sdl/crt_easymode.c
+	sdl/crt_hyllian.c
 	cycInt.c
 	cycles.c
 	dialog.c

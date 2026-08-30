@@ -115,6 +115,11 @@ typedef enum {
 	OPT_RESOLUTION,		/* TT/Falcon display options */
 	OPT_FORCE_MAX,
 	OPT_ASPECT,
+	OPT_VIDEL_BORDER_PAD,
+	OPT_VIDEL_HDB_PIXELS,
+	OPT_PIXEL_ASPECT,
+	OPT_CRT,
+	OPT_CRT_SHADER,
 
 	OPT_VDI,		/* VDI options */
 	OPT_VDI_PLANES,
@@ -329,6 +334,16 @@ static const opt_t HatariOptions[] = {
 	  "<bool>", "Resolution fixed to given max values" },
 	{ OPT_ASPECT, NULL, "--aspect",
 	  "<bool>", "Monitor aspect ratio correction" },
+	{ OPT_VIDEL_BORDER_PAD, NULL, "--videl-border-pad",
+	  "<int>", "Videl: pad the picture with n border pixels each side, fixed frame (0=off)" },
+	{ OPT_VIDEL_HDB_PIXELS, NULL, "--videl-hdb-pixels",
+	  "<bool>", "Videl: HDB/HDE units are pixels not cycles (odd-pixel HDB scroll)" },
+	{ OPT_PIXEL_ASPECT, NULL, "--pixel-aspect",
+	  "<x>", "Non-square pixel aspect ratio, pixel width/height (1.0=square)" },
+	{ OPT_CRT, NULL, "--crt",
+	  "<bool>", "Enable the selected CRT display shader (default=on)" },
+	{ OPT_CRT_SHADER, NULL, "--crt-shader",
+	  "<x>", "Select CRT shader (x = auto/easymode/hyllian, default=hyllian)" },
 
 	{ OPT_HEADER, NULL, NULL, NULL, "VDI" },
 	{ OPT_VDI,	NULL, "--vdi",
@@ -1212,7 +1227,7 @@ bool Opt_ParseParameters(int argc, const char * const argv[], int *exitval)
 	bool valid, enabled, ok = true;
 	event_actions_t *event;
 	opt_id_t optid;
-	float zoom;
+	float zoom, par;
 	size_t len;
 	int i, val;
 
@@ -1456,6 +1471,46 @@ bool Opt_ParseParameters(int argc, const char * const argv[], int *exitval)
 		case OPT_ASPECT:
 			ok = Opt_Bool(arg, OPT_ASPECT, &ConfigureParams.Screen.bAspectCorrect);
 			break;
+
+		case OPT_VIDEL_BORDER_PAD:
+			ok = Opt_Int(arg, OPT_VIDEL_BORDER_PAD,
+				     &ConfigureParams.Screen.nVidelBorderPad, 0, 256, 0);
+			break;
+
+		case OPT_VIDEL_HDB_PIXELS:
+			ok = Opt_Bool(arg, OPT_VIDEL_HDB_PIXELS,
+				      &ConfigureParams.Screen.bVidelHdbPixels);
+			break;
+
+		case OPT_PIXEL_ASPECT:
+			par = atof(arg);
+			if (par < 0.25 || par > 4.0)
+			{
+				return Opt_ShowError(OPT_PIXEL_ASPECT, arg,
+						     "Invalid pixel aspect ratio");
+			}
+			ConfigureParams.Screen.fPixelAspect = par;
+			break;
+
+		case OPT_CRT:
+			ok = Opt_Bool(arg, OPT_CRT, &ConfigureParams.Screen.bCrtFilter);
+			break;
+
+		case OPT_CRT_SHADER:
+		{
+			static const opt_keyval_t keyval[] = {
+				{"auto", CRT_SHADER_AUTO},
+				{"easymode", CRT_SHADER_EASYMODE},
+				{"hyllian", CRT_SHADER_HYLLIAN}
+			};
+			if (!Opt_SetKeyVal(arg, keyval, ARRAY_SIZE(keyval), &val))
+			{
+				return Opt_ShowError(OPT_CRT_SHADER, arg, "Unknown CRT shader");
+			}
+			ConfigureParams.Screen.nCrtShader = (CRTSHADER)val;
+			ConfigureParams.Screen.bCrtFilter = true;
+			break;
+		}
 
 			/* screen capture options */
 		case OPT_SCREEN_CROP:

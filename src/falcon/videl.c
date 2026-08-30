@@ -81,6 +81,16 @@ const char VIDEL_fileid[] = "Hatari videl.c";
 
 #define VIDEL_COLOR_REGS_BEGIN	0xff9800
 
+/* A 15 kHz Falcon RGB/TV frame is presented through the full logical raster.
+ * The 256x224 arcade ports in this tree use the same 384x264 raw timing as
+ * their original CRT targets (for example MAME's Nemesis set_raw timing).
+ * Videl's border registers describe where the active area starts, but some
+ * carefully tuned programs intentionally set the border begin/end pairs so
+ * that Hatari's derived border sizes are zero.  Keep the raw frame here and
+ * use the register-derived position inside it. */
+#define FALCON_RGB_OVERSCAN_WIDTH	384
+#define FALCON_RGB_OVERSCAN_HEIGHT	264
+
 
 struct videl_s {
 	uint8_t  reg_ffff8006_save;		/* save reg_ffff8006 as it's a read only register */
@@ -99,6 +109,7 @@ struct videl_s {
 	uint16_t save_scrWidth;			/* save screen width to detect a change of X resolution */
 	uint16_t save_scrHeight;		/* save screen height to detect a change of Y resolution */
 	uint16_t save_scrBpp;			/* save screen Bpp to detect a change of bitplan mode */
+	uint8_t  hdbPixelShift;			/* source pixel hidden by the odd-pixel HDB phase */
 
 	bool hostColorsSync;			/* Sync palette with host's */
 	bool bUseSTShifter;			/* whether to use ST or Falcon palette */
@@ -757,7 +768,7 @@ static int VIDEL_getScreenWidth(void)
 	int16_t hdb_offset, hde_offset;
 	int16_t leftBorder, rightBorder;
 	uint16_t bpp = VIDEL_getScreenBpp();
-	int cycPerPixel, divider;
+	int cycPerPixel, divider, pad;
 
 	/* X Size of the Display area */
 	videl.XSize = (IoMem_ReadWord(0xff8210) & 0x03ff) * 16 / bpp;
@@ -769,12 +780,12 @@ static int VIDEL_getScreenWidth(void)
 	while (videl.XSize > 2048)
 		videl.XSize /= 2;
 
-	/* If the user disabled the borders display from the gui, we suppress them */
-	if (ConfigureParams.Screen.bAllowOverscan == 0) {
-		videl.leftBorderSize = 0;
-		videl.rightBorderSize = 0;
-		return videl.XSize;
-	}
+	/* Interlace mode stores vertical timing in full lines; otherwise it is in
+	 * half-lines.  The RGB/TV frame margins are retained below even when the
+	 * legacy border checkbox is disabled. */
+	/* The Falcon display is presented as the complete SC1224 raster.  Keep
+	 * the overscan border in the framebuffer even when the legacy GUI toggle
+	 * is off; cropping it changes the Videl mode's visible geometry. */
 
 	/* According to Aura and Animal Mine doc about Videl, if a monochrome monitor is connected,
 	 * HDB and HDE have no significance and no border is displayed.
@@ -782,6 +793,7 @@ static int VIDEL_getScreenWidth(void)
 	if (videl.monitor_type == FALCON_MONITOR_MONO) {
 		videl.leftBorderSize = 0;
 		videl.rightBorderSize = 0;
+		videl.hdbPixelShift = 0;
 		return videl.XSize;
 	}
 
@@ -823,9 +835,76 @@ static int VIDEL_getScreenWidth(void)
 	/* Compute right border size in cycles */
 	rightBorder = hbb - hde_offset - hde;
 
-	videl.leftBorderSize = leftBorder / cycPerPixel;
-	videl.rightBorderSize = rightBorder / cycPerPixel;
+	/* In Falcon true-colour mode, a base address is aligned to four bytes.
+	 * Programs can recover the missing odd pixel by starting the display one
+	 * HDB cycle earlier.  The aligned base then points at the preceding pixel;
+	 * consume that pixel here so the converted framebuffer starts at the
+	 * program's intended (unaligned) address. */
+	videl.hdbPixelShift = 0;
+	if (bpp == 16) {
+		int nominal_hdb = hbe - hdb_offset;
+		int hdb_register = IoMem_ReadWord(0xff8288);
+
+		if (hdb_register & 0x0200)
+			nominal_hdb += hht + 2;
+		if (hdb == nominal_hdb - 1)
+			videl.hdbPixelShift = 1;
+		if (videl.hdbPixelShift)
+			LOG_TRACE(TRACE_VIDEL,
+			          "Videl : true-colour HDB odd-pixel source shift (HDB=%03x)\n",
+			          hdb);
+	}
+
+	/* HDB/HDE units as pixels rather than cycles (--videl-hdb-pixels).
+	 *
+	 * The division below is what discards the pacmania odd-pixel scroll: a
+	 * program that keeps a 4-byte-aligned screen base and compensates the
+	 * dropped pixel by moving HDB one unit produces a one-CYCLE border
+	 * change, which at 4 cycles/pixel truncates to zero. The base then still
+	 * steps two pixels at a time and a one-pixel-per-frame scroll comes out
+	 * as 0, 2, 0, 2 -- the picture wobbles instead of scrolling.
+	 *
+	 * With this on, one HDB unit moves the display one pixel, which is what
+	 * such a program assumes. Whether that is what real Videl does is NOT
+	 * established here -- it is the program's interpretation, made available
+	 * so the emulator can match it. */
+	if (ConfigureParams.Screen.bVidelHdbPixels) {
+		videl.leftBorderSize = leftBorder;
+		videl.rightBorderSize = rightBorder;
+	} else {
+		videl.leftBorderSize = leftBorder / cycPerPixel;
+		videl.rightBorderSize = rightBorder / cycPerPixel;
+	}
 	LOG_TRACE(TRACE_VIDEL, "left border size=%04x,    right border size=%04x\n", videl.leftBorderSize, videl.rightBorderSize);
+
+	/* Fixed-frame border padding (--videl-border-pad).
+	 *
+	 * The border sizes above follow HDB/HDE, so a program that rewrites HDB
+	 * every frame -- the pacmania odd-pixel scroll, where a 4-byte-aligned
+	 * screen base is compensated by shifting HDB -- moves them every frame
+	 * too. In a window whose borders compute to 0 (or negative, and so get
+	 * clamped flat below) there is nothing for the picture to move inside,
+	 * so it jitters against the window edge instead.
+	 *
+	 * With a pad the visible frame is pad + XSize + pad wide whatever HDB
+	 * does; the computed border only chooses where the picture sits inside
+	 * it. The frame never resizes and the whole display, borders included,
+	 * stays on screen. */
+	pad = ConfigureParams.Screen.nVidelBorderPad;
+	if (ConfigureParams.Screen.bVidelHdbPixels && pad < 1)
+		pad = 1;	/* the fine shift needs a pixel to move into */
+
+	if (pad > 0) {
+		int left = videl.leftBorderSize + pad;
+
+		if (left < 0)
+			left = 0;
+		else if (left > 2 * pad)
+			left = 2 * pad;
+
+		videl.leftBorderSize = left;
+		videl.rightBorderSize = 2 * pad - left;
+	}
 
 	if (videl.leftBorderSize < 0) {
 //		fprintf(stderr, "BORDER LEFT < 0   %d\n", videl.leftBorderSize);
@@ -834,6 +913,24 @@ static int VIDEL_getScreenWidth(void)
 	if (videl.rightBorderSize < 0) {
 //		fprintf(stderr, "BORDER RIGHT < 0   %d\n", videl.rightBorderSize);
 		videl.rightBorderSize = 0;
+	}
+
+	/* RGB/TV output is a 15 kHz CRT raster, not a cropped game viewport.
+	 * Always retain the complete overscan frame.  When the programmed Videl
+	 * timing supplies less border than that frame needs, add the missing
+	 * raster symmetrically.  Any positive register-derived offset is retained,
+	 * so intentionally shifted displays still land at their Videl position;
+	 * the common zero-border case consequently becomes centered. */
+	if (videl.monitor_type == FALCON_MONITOR_RGB ||
+	    videl.monitor_type == FALCON_MONITOR_TV) {
+		int frame_width = videl.XSize + videl.leftBorderSize +
+		                  videl.rightBorderSize;
+
+		if (frame_width < FALCON_RGB_OVERSCAN_WIDTH) {
+			int extra = FALCON_RGB_OVERSCAN_WIDTH - frame_width;
+			videl.leftBorderSize += extra / 2;
+			videl.rightBorderSize += extra - extra / 2;
+		}
 	}
 
 	return videl.leftBorderSize + videl.XSize + videl.rightBorderSize;
@@ -879,11 +976,6 @@ static int VIDEL_getScreenHeight(void)
 	}
 
 	/* If the user disabled the borders display from the gui, we suppress them */
-	if (ConfigureParams.Screen.bAllowOverscan == 0) {
-		videl.upperBorderSize = 0;
-		videl.lowerBorderSize = 0;
-	}
-
 	if (!(vmode & 0x02)){		/* interlace */
 		videl.YSize >>= 1;
 		videl.upperBorderSize >>= 1;
@@ -894,6 +986,39 @@ static int VIDEL_getScreenHeight(void)
 		videl.YSize >>= 1;
 		videl.upperBorderSize >>= 1;
 		videl.lowerBorderSize >>= 1;
+	}
+
+	/* Fixed-frame border padding -- the vertical half of --videl-border-pad
+	 * (see VIDEL_getScreenWidth). A mode whose VDB/VBE and VBB/VDE coincide
+	 * reports 0/0 here, so without this the picture fills the window edge to
+	 * edge and there is no border to see. */
+	if (ConfigureParams.Screen.nVidelBorderPad > 0 &&
+	    videl.monitor_type != FALCON_MONITOR_MONO) {
+		int pad = ConfigureParams.Screen.nVidelBorderPad;
+		int upper = videl.upperBorderSize + pad;
+
+		if (upper < 0)
+			upper = 0;
+		else if (upper > 2 * pad)
+			upper = 2 * pad;
+
+		videl.upperBorderSize = upper;
+		videl.lowerBorderSize = 2 * pad - upper;
+	}
+
+	/* Keep the complete 15 kHz RGB/TV vertical raster too.  As horizontally,
+	 * the Videl-derived margins win when present and the missing margin is
+	 * split around the active area when a port deliberately reports 0/0. */
+	if (videl.monitor_type == FALCON_MONITOR_RGB ||
+	    videl.monitor_type == FALCON_MONITOR_TV) {
+		int frame_height = videl.YSize + videl.upperBorderSize +
+		                   videl.lowerBorderSize;
+
+		if (frame_height < FALCON_RGB_OVERSCAN_HEIGHT) {
+			int extra = FALCON_RGB_OVERSCAN_HEIGHT - frame_height;
+			videl.upperBorderSize += extra / 2;
+			videl.lowerBorderSize += extra - extra / 2;
+		}
 	}
 
 	return videl.upperBorderSize + videl.YSize + videl.lowerBorderSize;
@@ -981,6 +1106,9 @@ bool VIDEL_renderScreen(void)
 	bool change = false;
 
 	uint32_t videoBase = Video_GetScreenBaseAddr();
+
+	if (vbpp == 16 && videl.hdbPixelShift)
+		videoBase = (videoBase + 2 * videl.hdbPixelShift) & 0xffffff;
 
 	if (vw > 0 && vw != videl.save_scrWidth) {
 		LOG_TRACE(TRACE_VIDEL, "Videl : width change from %d to %d\n", videl.save_scrWidth, vw);
