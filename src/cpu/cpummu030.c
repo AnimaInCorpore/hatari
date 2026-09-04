@@ -3632,8 +3632,22 @@ void m68k_do_rte_mmu030c (uaecptr a7)
 	 * As a temporary fix we force a full reload of prefetch registers for the current PC
 	 */
 	if (frame == 0xb) {
-		mmu030_opcode = -1;
-		fill_prefetch_030_ntx();
+		// Only do this when the faulted access still has to be redone. A cleared
+		// DF bit means the handler emulated the access itself and the
+		// instruction must be *continued*, which this fixup makes impossible
+		// three ways: mmu030_opcode = -1 sends the run loop through insretry,
+		// fill_prefetch_030_ntx() itself does mmu030_idx = mmu030_idx_done = 0
+		// (so the access is repeated and the instruction never retires), and the
+		// refill re-reads the instruction stream -- hardware continues from the
+		// state in the frame and never re-fetches, so a handler that rewrites
+		// the faulting instruction would otherwise resume a hybrid of the old
+		// opcode and the newly written operands. On the resume path keep the
+		// prefetch restored from the frame, which is what the pipe C/pipe B and
+		// opcode-storage fields are for.
+		if (ssw & MMU030_SSW_DF) {
+			mmu030_opcode = -1;
+			fill_prefetch_030_ntx();
+		}
 	}
 #endif
 }

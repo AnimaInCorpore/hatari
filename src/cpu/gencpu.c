@@ -4093,8 +4093,16 @@ static void genastore_2 (const char *from, amodes mode, const char *reg, wordsiz
 
 		set_last_access_ipl_prev(flags);
 
-		if (!(flags & GF_NOFAULTPC))
-			gen_set_fault_pc (false, false);
+		if (!(flags & GF_NOFAULTPC)) {
+			// 68030: a faulting write through absolute addressing is not
+			// reported as the instruction's completing access. Hardware stacks
+			// the long (format $B) frame with the PC still at the faulting
+			// instruction, where the register-indirect forms stack the short
+			// (format $A) frame with the PC past it -- so the last-write path
+			// must be suppressed for absw/absl only.
+			bool abs_ea = (mode == absw || mode == absl);
+			gen_set_fault_pc (false, abs_ea);
+		}
 		if (using_mmu) {
 			switch (size) {
 			case sz_byte:
