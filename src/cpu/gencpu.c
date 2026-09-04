@@ -10314,6 +10314,11 @@ static void generate_cpu (int id, int mode)
 			opcode_next_clev[rp] = cpu_level;
 	} else if (id == 35) { // 35 = 68030 MMU + caches + CE
 		mmu_postfix = "030c";
+		// MOVES needs the same access-state wrappers as every other memory
+		// access in this table: without them a faulting MOVES write never
+		// loads mmu030_data_buffer_out, so the format $A/$B frame stacks a
+		// zero data output buffer and the RTE rerun writes zeros.
+		xfc_postfix = "_state";
 		cpu_level = 3;
 		using_ce020 = 2;
 		using_prefetch_020 = 2;
