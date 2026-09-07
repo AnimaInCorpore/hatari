@@ -3396,6 +3396,11 @@ void m68k_do_rte_mmu030c (uaecptr a7)
 		regs.prefetch020[1] = stagesbc >> 16;
 		regs.prefetch020[0] = oc >> 16;
 		mmu030_opcode_stageb = (uae_u16)oc;
+		// Format A stores the next opcode: the faulted instruction has finished
+		// except for its last write. Restore it before retrying that write, or
+		// the common restore below puts RTE in regs.irc and a second fault saves
+		// RTE as the next opcode in the new short frame.
+		mmu030_opcode = (uae_u16)oc;
 
 		mmu030_data_buffer_out = mmu030_data_buffer_out_v;
 		mmu030_state[0] = 0;
@@ -3724,4 +3729,3 @@ void restore_mmu030_finish ( void )
 	mmu030.transparent.tt1 = mmu030_decode_tt(tt1_030);
 	tt_enabled = (tt0_030 & TT_ENABLE) || (tt1_030 & TT_ENABLE);
 }
-

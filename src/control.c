@@ -163,6 +163,26 @@ static bool Control_InsertEvent(const char *event)
 		Keyboard.bRButtonDown &= ~BUTTON_MOUSE;
 		return true;
 	}
+	/* F030AUX: left button and relative motion, so a headless run can drive
+	 * a pointer the way the SDL window would (GuiEvent_HandleMouseMotion). */
+	if (strcmp(event, "leftdown") == 0) {
+		Keyboard.bLButtonDown |= BUTTON_MOUSE;
+		return true;
+	}
+	if (strcmp(event, "leftup") == 0) {
+		Keyboard.bLButtonDown &= ~BUTTON_MOUSE;
+		return true;
+	}
+	if (strncmp(event, "mousemove ", 10) == 0) {
+		int dx = 0, dy = 0;
+		if (sscanf(event + 10, "%d %d", &dx, &dy) != 2) {
+			fprintf(stderr, "ERROR: 'mousemove' needs two integers, got '%s'\n", event + 10);
+			return false;
+		}
+		KeyboardProcessor.Mouse.dx += dx;
+		KeyboardProcessor.Mouse.dy += dy;
+		return true;
+	}
 	if (Control_InsertKey(event)) {
 		return true;
 	}
@@ -172,6 +192,9 @@ static bool Control_InsertEvent(const char *event)
 		"- doubleclick\n"
 		"- rightdown\n"
 		"- rightup\n"
+		"- leftdown\n"
+		"- leftup\n"
+		"- mousemove <dx> <dy>\n"
 		"- keypress <key>\n"
 		"- keydown <key>\n"
 		"- keyup <key>\n"

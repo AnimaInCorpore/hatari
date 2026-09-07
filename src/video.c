@@ -686,7 +686,7 @@ static VIDEO_TIMING	VideoTimings[ VIDEO_TIMING_MAX_NB ];
 static VIDEO_TIMING	*pVideoTiming;
 static int		VideoTiming;
 
-static uint64_t		VBL_ClockCounter;
+uint64_t		VBL_ClockCounter;		/* CyclesGlobalClockCounter at the start of the current video frame */
 
 
 /* Convert a horizontal video position measured at 8 MHz on STF/STE */

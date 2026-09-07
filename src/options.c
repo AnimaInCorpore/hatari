@@ -195,6 +195,8 @@ typedef enum {
 	OPT_CPU_DATA_CACHE,
 	OPT_CPU_CYCLE_EXACT,
 	OPT_CPU_ADDR24,
+	OPT_VIDEL_CONTENTION,
+	OPT_VIDEL_BURST_CYCLES,
 	OPT_FPU_TYPE,
 /*	OPT_FPU_JIT_COMPAT, */
 	OPT_FPU_SOFTFLOAT,
@@ -496,6 +498,10 @@ static const opt_t HatariOptions[] = {
 	  "<bool>", "Use cycle exact CPU emulation" },
 	{ OPT_CPU_ADDR24, NULL, "--addr24",
 	  "<bool>", "Use 24-bit instead of 32-bit addressing mode" },
+	{ OPT_VIDEL_CONTENTION, NULL, "--videl-contention",
+	  "<bool>", "Videl steals ST-RAM bus slots from the CPU (Falcon, default=on)" },
+	{ OPT_VIDEL_BURST_CYCLES, NULL, "--videl-burst-cycles",
+	  "<int>", "Cycles one 17-long Videl ST-RAM burst holds the bus (default=19)" },
 	{ OPT_FPU_TYPE, NULL, "--fpu",
 	  "<x>", "FPU type (x=none/68881/68882/internal)" },
 	/*{ OPT_FPU_JIT_COMPAT, NULL, "--fpu-compatible",
@@ -2061,6 +2067,16 @@ bool Opt_ParseParameters(int argc, const char * const argv[], int *exitval)
 				bLoadAutoSave = false;
 			}
 			break;
+		case OPT_VIDEL_CONTENTION:
+			ok = Opt_Bool(arg, OPT_VIDEL_CONTENTION,
+				      &ConfigureParams.System.bVidelBusContention);
+			break;
+
+		case OPT_VIDEL_BURST_CYCLES:
+			ok = Opt_Int(arg, OPT_VIDEL_BURST_CYCLES,
+				     &ConfigureParams.System.nVidelBurstCycles, 1, 1024, 0);
+			break;
+
 		case OPT_CPU_ADDR24:
 			ok = Opt_Bool(arg, OPT_CPU_ADDR24, &ConfigureParams.System.bAddressSpace24);
 			bLoadAutoSave = false;

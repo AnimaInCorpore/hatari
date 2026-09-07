@@ -9945,7 +9945,17 @@ STATIC_INLINE struct cache030 *getdcache030 (struct cache030 *cp, uaecptr addr, 
 
 STATIC_INLINE void update_dcache030 (struct cache030 *c, uae_u32 val, uae_u32 tag, uae_u8 fc, int lws)
 {
-	if (c->tag != tag)
+	/* The 68030 data cache tags a line with FC2 as well as the address, so a
+	 * line filled from user data space and a line filled from supervisor
+	 * data space at the same address are different lines.  Keep that
+	 * distinction here: a fill or write-allocate whose function code differs
+	 * from the line's is a miss that replaces the whole line, not an update
+	 * that leaves three longwords of the other address space valid under
+	 * the new function code.  (F030AUX: A/UX's Toolbox process writes its
+	 * own low-memory vectors in user space while the kernel rewrites vectors
+	 * 8 and 10 on every context switch; without this, the user's A-line
+	 * dispatcher surfaced in the supervisor's vector fetch.) */
+	if (c->tag != tag || c->fc != fc)
 		c->valid[0] = c->valid[1] = c->valid[2] = c->valid[3] = false;
 	c->tag = tag;
 	c->fc = fc;

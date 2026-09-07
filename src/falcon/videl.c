@@ -76,6 +76,8 @@ const char VIDEL_fileid[] = "Hatari videl.c";
 #include "stMemory.h"
 #include "tos.h"
 #include "videl.h"
+#include "combel.h"
+#include "clocks_timings.h"
 #include "video.h"				/* for bUseHighRes variable */
 #include "vdi.h"				/* for bUseVDIRes variable */
 
@@ -151,6 +153,8 @@ void VIDEL_reset(void)
 	/* Reset IO register (some are not initialized by TOS) */
 	IoMem_WriteWord(0xff820e, 0);    /* Line offset */
 	IoMem_WriteWord(0xff8264, 0);    /* Horizontal scroll */
+
+	Combel_Reset();
 }
 
 /**
@@ -718,6 +722,9 @@ void VIDEL_VideoRasterHBL(void)
 
 	/* TODO: VFC is incremented every half line, here, we increment it every line */
 	videl.vertFreqCounter++;
+
+	/* Tell COMBEL what Videl will be asking ST-RAM for */
+	VIDEL_UpdateBusDemand();
 }
 
 
@@ -1022,6 +1029,121 @@ static int VIDEL_getScreenHeight(void)
 	}
 
 	return videl.upperBorderSize + videl.YSize + videl.lowerBorderSize;
+}
+
+
+/*-----------------------------------------------------------------------*/
+/*
+ * Report Videl's appetite for source data to COMBEL, which owns the ST-RAM
+ * schedule (see falcon/combel.c).  Videl drains its FIFO at the pixel rate and
+ * raises VREQ when it needs more; everything below is the geometry that sets
+ * that rate, read straight out of the Videl timing registers rather than out
+ * of Hatari's ST-derived HBL grid -- for VGA the two disagree by a factor of
+ * two on the line count while agreeing on the frame length.
+ *
+ * Called on every HBL, which is how a mode change part way down a frame gets
+ * picked up.
+ */
+void VIDEL_UpdateBusDemand(void)
+{
+	COMBEL_VIDEO_DEMAND demand;
+	int cycPerPixel, divider, baseclock, hfreq;
+	uint32_t linewidth, hht, vmode, vdb, vde, line_units, win_units;
+	uint32_t hdb, hdb_reg, bpp, xsize;
+	int hlshift;
+
+	if (!ConfigureParams.System.bVidelBusContention
+	    || !Config_IsMachineFalcon() || bUseVDIRes) {
+		Combel_Video_Idle();
+		return;
+	}
+
+	memset(&demand, 0, sizeof(demand));
+
+	/* Words of source data Videl reads per line.  The line offset register
+	 * ($ff820e) is skipped rather than read, so it plays no part. */
+	linewidth = IoMem_ReadWord(0xff8210) & 0x03ff;
+	if (linewidth == 0 || !Videl_GetPixelCyclesAndDivider(&cycPerPixel, &divider)) {
+		Combel_Video_Idle();
+		return;
+	}
+
+	if (IoMem_ReadWord(0xff82c0) & 4)	/* VC0 bit 2: 25 MHz, else 32 MHz */
+		baseclock = 25175000;
+	else
+		baseclock = 32084988;
+
+	hht = IoMem_ReadWord(0xff8282) & 0x1ff;
+	hfreq = baseclock / (2 * divider * ((int)hht + 2));
+
+	/* TOS walks the Videl timing registers through incoherent intermediate
+	 * states while it switches modes, and a half-written HHT reads back as a
+	 * line rate no CRT ever ran at.  Taking such a state at face value builds
+	 * a schedule that stalls the CPU almost solid, so require a line rate a
+	 * real Videl can produce: 15.6 kHz RGB/TV, 31.25 kHz VGA and 35.7 kHz
+	 * mono all sit comfortably inside this. */
+	if (hfreq < 10000 || hfreq > 100000) {
+		Combel_Video_Idle();
+		return;
+	}
+	demand.line_cycles = MachineClocks.CPU_Freq_Emul / hfreq;
+
+	/* Lines of source data, from VDB/VDE.  Both count half lines unless the
+	 * interlace bit is set.  A line-doubled mode shows each source line on
+	 * two scan lines but reads it once: mikro measured doubling costing a
+	 * few percent, not the doubling that a displayed-pixel model predicts. */
+	vmode = IoMem_ReadWord(0xff82c2);
+	vdb = IoMem_ReadWord(0xff82a8) & 0x07ff;
+	vde = IoMem_ReadWord(0xff82aa) & 0x07ff;
+	hlshift = (vmode & 0x02) ? 0 : 1;
+	if (vde <= vdb) {
+		Combel_Video_Idle();
+		return;
+	}
+	demand.line_step = (vmode & 0x01) ? 2 : 1;
+	demand.first_line = vdb >> hlshift;
+	demand.source_lines = ((vde - vdb) >> hlshift) / demand.line_step;
+	if (demand.source_lines == 0
+	    || demand.first_line + demand.source_lines * demand.line_step
+	       > MachineClocks.CPU_Freq_Emul / demand.line_cycles / 40) {
+		/* No display, or more scan lines than the line rate leaves room
+		 * for at 40 Hz -- another half-written state. */
+		Combel_Video_Idle();
+		return;
+	}
+
+	demand.longs_per_line = (linewidth * 2 + 3) / 4;
+
+	/* Where in the line the pixels are output.  One HHT/HDB register unit is
+	 * 'divider' ticks of the video base clock -- that is what makes the
+	 * hfreq formula above come out -- and one pixel is 'cycPerPixel' of the
+	 * same ticks, so a line is 2*(HHT+2) units and the displayed part of it
+	 * is xsize*cycPerPixel/divider units.  Checked against three modes: VGA
+	 * 640x480 gives 320 of 400 units, 15 kHz RGB 320x200 gives 80 of 128,
+	 * and mono gives units == pixels.  (Note this disagrees by a factor of
+	 * 'divider' with the pixel conversion in VIDEL_getScreenWidth, whose own
+	 * comment says that interpretation is not established.)
+	 * Bit 9 of HDB means the display begins in the previous line's units,
+	 * which we take as "at the start of this one". */
+	bpp = VIDEL_getScreenBpp();
+	xsize = linewidth * 16 / bpp;
+	line_units = 2 * (hht + 2);
+	win_units = xsize * cycPerPixel / divider;
+
+	hdb_reg = IoMem_ReadWord(0xff8288);
+	hdb = (hdb_reg & 0x0200) ? 0 : (hdb_reg & 0x1ff);
+
+	if (win_units == 0 || win_units > line_units) {
+		hdb = 0;			/* programming we cannot place */
+		win_units = line_units;
+	}
+	if (hdb + win_units > line_units)
+		hdb = line_units - win_units;
+
+	demand.display_start = (uint32_t)((uint64_t)hdb * demand.line_cycles / line_units);
+	demand.display_cycles = (uint32_t)((uint64_t)win_units * demand.line_cycles / line_units);
+
+	Combel_Video_SetDemand(&demand);
 }
 
 
@@ -1354,4 +1476,7 @@ void Videl_Info(FILE *fp, uint32_t dummy)
 	fprintf(fp, "Palette type: %s\n", videl.bUseSTShifter ?
 		"ST/STE compat ($FF8240)" :
 		"Falcon ($FF9800)");
+
+	fprintf(fp, "\n-------------------------\n");
+	Combel_Info(fp, 0);
 }

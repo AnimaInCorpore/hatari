@@ -28,6 +28,7 @@ const char Configuration_fileid[] = "Hatari configuration.c";
 #include "statusbar.h"
 #include "vdi.h"
 #include "video.h"
+#include "combel.h"
 #include "avi_record.h"
 #include "clocks_timings.h"
 #include "68kDisass.h"
@@ -576,6 +577,8 @@ static const struct Config_Tag configs_System[] =
 /* JIT	{ "bCompatibleFPU", Bool_Tag, &ConfigureParams.System.bCompatibleFPU }, */
 	{ "bSoftFloatFPU", Bool_Tag, &ConfigureParams.System.bSoftFloatFPU },
 	{ "bMMU", Bool_Tag, &ConfigureParams.System.bMMU },
+	{ "bVidelBusContention", Bool_Tag, &ConfigureParams.System.bVidelBusContention },
+	{ "nVidelBurstCycles", Int_Tag, &ConfigureParams.System.nVidelBurstCycles },
 	{ "VideoTiming", Int_Tag, &ConfigureParams.System.VideoTimingMode },
 	{ NULL , Error_Tag, NULL }
 };
@@ -848,6 +851,8 @@ void Configuration_SetDefault(void)
 	ConfigureParams.System.bCompatibleFPU = true; /* JIT */
 	ConfigureParams.System.bSoftFloatFPU = false;
 	ConfigureParams.System.bMMU = false;
+	ConfigureParams.System.bVidelBusContention = true;
+	ConfigureParams.System.nVidelBurstCycles = COMBEL_REFILL_CYCLES_DEFAULT;
 	ConfigureParams.System.bCpuDataCache = true;
 	ConfigureParams.System.bCycleExactCpu = true;
 	ConfigureParams.System.VideoTimingMode = VIDEO_TIMING_MODE_WS3;
@@ -1269,6 +1274,8 @@ void Configuration_MemorySnapShot_Capture(bool bSave)
 	MemorySnapShot_Store(&ConfigureParams.System.n_FPUType, sizeof(ConfigureParams.System.n_FPUType));
 	MemorySnapShot_Store(&ConfigureParams.System.bCompatibleFPU, sizeof(ConfigureParams.System.bCompatibleFPU));
 	MemorySnapShot_Store(&ConfigureParams.System.bMMU, sizeof(ConfigureParams.System.bMMU));
+	MemorySnapShot_Store(&ConfigureParams.System.bVidelBusContention, sizeof(ConfigureParams.System.bVidelBusContention));
+	MemorySnapShot_Store(&ConfigureParams.System.nVidelBurstCycles, sizeof(ConfigureParams.System.nVidelBurstCycles));
 
 	MemorySnapShot_Store(&MachineClocks,sizeof(MachineClocks));
 
