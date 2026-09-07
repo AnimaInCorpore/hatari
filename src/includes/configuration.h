@@ -424,8 +424,6 @@ typedef struct
   bool bCompatibleFPU;            /* More compatible FPU */
   bool bSoftFloatFPU;
   bool bMMU;                      /* TRUE if MMU is enabled */
-  bool bVidelBusContention;       /* Falcon: Videl steals ST-RAM bus slots from the CPU */
-  int nVidelBurstCycles;          /* Cycles one 17-long Videl burst holds the ST-RAM bus */
 } CNF_SYSTEM;
 
 typedef struct
