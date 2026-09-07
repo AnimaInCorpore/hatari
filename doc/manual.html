@@ -1044,6 +1044,14 @@ with better prefetch accuracy and cycle counting</p>
 <p class="paramdesc">Emulate &gt;=030 CPU data cache</p>
 <p class="parameter">--addr24 &lt;bool&gt;</p>
 <p class="paramdesc">Use 24-bit instead of 32-bit addressing mode (24-bit is enabled by default)</p>
+<p class="parameter">--videl-contention &lt;bool&gt;</p>
+<p class="paramdesc">Falcon: let Videl steal ST-RAM bus slots from the CPU while it
+fetches the display. Only accesses that reach ST-RAM are stalled; cache hits,
+TT-RAM and I/O are not. Enabled by default</p>
+<p class="parameter">--videl-burst-cycles &lt;int&gt;</p>
+<p class="paramdesc">Falcon: cycles one 17-long Videl ST-RAM burst holds the bus,
+at the emulated CPU clock (default 19, i.e. the measured ~70 ns per fetched long
+at 16 MHz)</p>
 <p class="parameter">--fpu &lt;x&gt;</p>
 <p class="paramdesc">FPU type (x=none/68881/68882/internal)</p>
 <p class="parameter">--fpu-softfloat &lt;bool&gt;</p>

@@ -20,6 +20,9 @@
 #include "cpummu.h"
 #include "blitter.h"
 #include "debug.h"
+#ifdef WINUAE_FOR_HATARI
+#include "combel.h"
+#endif
 #include "savestate.h"
 
 #define WRITE_LOG_BUF_SIZE 4096
@@ -326,6 +329,17 @@ uae_u32 wait_cpu_cycle_read_ce020 (uaecptr addr, int mode)
 
 //fprintf ( stderr , "wait read ce020 glob %lu\n" , CyclesGlobalClockCounter );
 //fprintf ( stderr , "wait read ce020 %lu %lu\n" , currcycle / cpucycleunit , currcycle );
+	/* COMBEL serves Videl's VREQ ahead of the CPU (Falcon030 Service Guide:
+	 * video > DMA > refresh > blitter), so an ST-RAM access issued while a
+	 * refill is running waits for it, and only then aligns to its own bus
+	 * slot below. */
+	if ( Combel_StRam_Contended )
+	{
+		int stall = Combel_StRam_Stall ( CyclesGlobalClockCounter + currcycle*2/CYCLE_UNIT , addr );
+		if ( stall > 0 )
+			x_do_cycles ( stall * cpucycleunit );
+	}
+
 	int bus_pos = ( CyclesGlobalClockCounter + currcycle*2/CYCLE_UNIT ) & 3;
 	if ( ( bus_pos & 2 ) == 2 )
 //	if ( bus_pos )
@@ -404,6 +418,14 @@ void wait_cpu_cycle_write_ce020 (uaecptr addr, int mode, uae_u32 v)
 #else						/* WINUAE_FOR_HATARI */
 
 //fprintf ( stderr , "wait read ce020 %lu %lu\n" , currcycle / cpucycleunit , currcycle );
+	/* See wait_cpu_cycle_read_ce020(): a refill blocks the write too. */
+	if ( Combel_StRam_Contended )
+	{
+		int stall = Combel_StRam_Stall ( CyclesGlobalClockCounter + currcycle*2/CYCLE_UNIT , addr );
+		if ( stall > 0 )
+			x_do_cycles ( stall * cpucycleunit );
+	}
+
 	int bus_pos = ( CyclesGlobalClockCounter + currcycle*2/CYCLE_UNIT ) & 3;
 	if ( ( bus_pos & 2 ) == 2 )
 //	if ( bus_pos )

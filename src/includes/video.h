@@ -155,6 +155,7 @@ extern int nScreenRefreshRate;
 
 extern int nScanlinesPerFrame;
 extern int nCyclesPerLine;
+extern uint64_t VBL_ClockCounter;
 extern int TTSpecialVideoMode;
 extern int LineTimerBPos;
 extern int TimerBEventCountCycleStart;
