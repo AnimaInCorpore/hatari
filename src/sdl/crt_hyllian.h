@@ -4,7 +4,8 @@
 
 #include <stdint.h>
 
-void CRT_Hyllian_Process(uint32_t *dst, const uint32_t *src, int width,
-                         int height, int src_pitch);
+void CRT_Hyllian_Process(uint32_t *dst, int dst_width, int dst_height,
+                         const uint32_t *src, int src_width, int src_height,
+                         int src_pitch);
 
 #endif

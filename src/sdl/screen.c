@@ -68,6 +68,7 @@ static uint32_t *sdlCrtPixels;
 static bool bUseSdlRenderer;            /* true when using SDL2 renderer */
 static bool bIsSoftwareRenderer;
 static int desktop_width, desktop_height;
+static int sdlCrtWidth, sdlCrtHeight;
 
 static CRTSHADER Screen_GetCrtShader(void)
 {
@@ -87,20 +88,37 @@ void Screen_UpdateRects(SDL_Surface *screen, int numrects, SDL_Rect *rects)
 		if (ConfigureParams.Screen.bCrtFilter) {
 			int display_height = screen->h - Statusbar_GetHeight();
 			int row;
-			if (Screen_GetCrtShader() == CRT_SHADER_HYLLIAN)
-				CRT_Hyllian_Process(sdlCrtPixels, screen->pixels, screen->w,
-				                   display_height, screen->pitch);
-			else
+			if (Screen_GetCrtShader() == CRT_SHADER_HYLLIAN) {
+				int crt_display_height = sdlCrtHeight;
+				int status_height = screen->h - display_height;
+				if (status_height > 0)
+					crt_display_height -= status_height * sdlCrtHeight / screen->h;
+				CRT_Hyllian_Process(sdlCrtPixels, sdlCrtWidth, crt_display_height,
+				                   screen->pixels, screen->w, display_height,
+				                   screen->pitch);
+				for (row = crt_display_height; row < sdlCrtHeight; ++row) {
+					int source_row = display_height +
+						(row - crt_display_height) * status_height /
+						(sdlCrtHeight - crt_display_height);
+					int column;
+					for (column = 0; column < sdlCrtWidth; ++column)
+						sdlCrtPixels[row * sdlCrtWidth + column] =
+							((const uint32_t *)((const unsigned char *)screen->pixels +
+							 source_row * screen->pitch))[column * screen->w / sdlCrtWidth];
+				}
+				SDL_UpdateTexture(sdlTexture, NULL, sdlCrtPixels,
+				                  sdlCrtWidth * (int)sizeof(uint32_t));
+			} else {
 				CRT_EasyMode_Process(sdlCrtPixels, screen->pixels, screen->w,
 				                     display_height, screen->pitch);
-			/* Keep Hatari's status bar visible, but outside the CRT pass. */
-			for (row = display_height; row < screen->h; ++row)
-				memcpy(sdlCrtPixels + (size_t)row * screen->w,
-				       (const unsigned char *)screen->pixels +
-				       (size_t)row * screen->pitch,
-				       (size_t)screen->w * sizeof(uint32_t));
-			SDL_UpdateTexture(sdlTexture, NULL, sdlCrtPixels,
-			                  screen->w * (int)sizeof(uint32_t));
+				for (row = display_height; row < screen->h; ++row)
+					memcpy(sdlCrtPixels + (size_t)row * screen->w,
+					       (const unsigned char *)screen->pixels +
+					       (size_t)row * screen->pitch,
+					       (size_t)screen->w * sizeof(uint32_t));
+				SDL_UpdateTexture(sdlTexture, NULL, sdlCrtPixels,
+				                  screen->w * (int)sizeof(uint32_t));
+			}
 		} else {
 			SDL_UpdateTexture(sdlTexture, NULL, screen->pixels, screen->pitch);
 		}
@@ -397,12 +415,21 @@ void Screen_SetTextureScale(int width, int height, int win_width, int win_height
 			sdlTexture = NULL;
 		}
 
+		int texture_width = width;
+		int texture_height = height;
+		if (ConfigureParams.Screen.bCrtFilter &&
+		    Screen_GetCrtShader() == CRT_SHADER_HYLLIAN) {
+			texture_width = win_width;
+			texture_height = win_height;
+		}
+		sdlCrtWidth = texture_width;
+		sdlCrtHeight = texture_height;
 		sdlTexture = SDL_CreateTexture(sdlRenderer, SDL_PIXELFORMAT_RGB888,
 					       SDL_TEXTUREACCESS_STREAMING,
-					       width, height);
+					       texture_width, texture_height);
 		if (!sdlTexture)
 		{
-			fprintf(stderr, "%dx%d texture\n", width, height);
+			fprintf(stderr, "%dx%d texture\n", texture_width, texture_height);
 			Main_ErrorExit("Failed to create texture:", SDL_GetError(), -3);
 		}
 
@@ -586,6 +613,9 @@ bool Screen_SetVideoSize(int width, int height, bool bForceChange)
 			SDL_RenderSetLogicalSize(sdlRenderer,
 						 (int)(width * pixel_aspect + 0.5f), height);
 #endif
+		else if (ConfigureParams.Screen.bCrtFilter &&
+		         Screen_GetCrtShader() == CRT_SHADER_HYLLIAN)
+			SDL_RenderSetScale(sdlRenderer, 1.0f, 1.0f);
 		else
 			SDL_RenderSetScale(sdlRenderer, scale * pixel_aspect, scale);
 
@@ -611,7 +641,15 @@ bool Screen_SetVideoSize(int width, int height, bool bForceChange)
 		Screen_SetTextureScale(width, height, win_width, win_height, true);
 		if (ConfigureParams.Screen.bCrtFilter)
 		{
-			sdlCrtPixels = calloc((size_t)width * height, sizeof(uint32_t));
+			int crt_width = width;
+			int crt_height = height;
+			if (Screen_GetCrtShader() == CRT_SHADER_HYLLIAN) {
+				crt_width = win_width;
+				crt_height = win_height;
+			}
+			sdlCrtWidth = crt_width;
+			sdlCrtHeight = crt_height;
+			sdlCrtPixels = calloc((size_t)crt_width * crt_height, sizeof(uint32_t));
 			if (!sdlCrtPixels)
 				Main_ErrorExit("Could not allocate CRT filter buffer", "", -2);
 		}

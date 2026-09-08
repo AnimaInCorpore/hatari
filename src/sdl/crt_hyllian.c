@@ -127,16 +127,22 @@ static void cubic_rgb(const uint32_t *src, int width, int height, int pitch,
 	*blue = cubic_channel(src, width, height, pitch, x, y, 0);
 }
 
-void CRT_Hyllian_Process(uint32_t *dst, const uint32_t *src, int width,
-	                     int height, int src_pitch)
+void CRT_Hyllian_Process(uint32_t *dst, int dst_width, int dst_height,
+	                     const uint32_t *src, int src_width, int src_height,
+	                     int src_pitch)
 {
 	int x, y;
-	const bool scanlines = height < HYLLIAN_SCANLINE_CUTOFF;
+	const bool scanlines = dst_height < HYLLIAN_SCANLINE_CUTOFF;
 
 	init_gamma_luts();
 
-	for (y = 0; y < height; ++y) {
-		for (x = 0; x < width; ++x) {
+	for (y = 0; y < dst_height; ++y) {
+		/* Run the reconstruction at the physical presentation resolution.
+		 * The source-to-output mapping belongs here; in particular, the mask
+		 * below must count real output pixels, not enlarged emulated pixels. */
+		int source_y = (y * src_height) / dst_height;
+		for (x = 0; x < dst_width; ++x) {
+			int source_x = (x * src_width) / dst_width;
 			float red0, green0, blue0;
 			float red1, green1, blue1;
 			float pos0, pos1, red, green, blue;
@@ -144,11 +150,11 @@ void CRT_Hyllian_Process(uint32_t *dst, const uint32_t *src, int width,
 			float mask, color_boost;
 			int dot;
 
-			cubic_rgb(src, width, height, src_pitch, x, y,
+			cubic_rgb(src, src_width, src_height, src_pitch, source_x, source_y,
 			          &red0, &green0, &blue0);
 
 			if (scanlines) {
-				cubic_rgb(src, width, height, src_pitch, x, y + 1,
+				cubic_rgb(src, src_width, src_height, src_pitch, source_x, source_y + 1,
 				          &red1, &green1, &blue1);
 				/* Two alternating beam positions approximate the physical
 				 * line spread while keeping one source row per Videl line. */
@@ -195,7 +201,7 @@ void CRT_Hyllian_Process(uint32_t *dst, const uint32_t *src, int width,
 			red = gamma_out(red * color_boost);
 			green = gamma_out(green * color_boost);
 			blue = gamma_out(blue * color_boost);
-			dst[y * width + x] = rgb(red, green, blue);
+			dst[y * dst_width + x] = rgb(red, green, blue);
 		}
 	}
 }
