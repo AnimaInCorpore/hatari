@@ -643,6 +643,10 @@ void Crossbar_DmaCtrlReg_WriteByte(void)
 		/* Turning on DMA Play sound emulation */
 		dmaPlay.isRunning = 1;
 		dmaPlay.loopMode = (sndCtrl & 0x2) >> 1;
+		/* Playback starts on the left sample of a frame. Without this the
+		   phase left by a previous stop (e.g. an 8 bits mono buffer ending
+		   after its left copy) swaps the channels of the next stereo replay. */
+		dmaPlay.currentFrame = 0;
 		nCbar_DmaSoundControl = sndCtrl;
 		Crossbar_setDmaPlay_Settings();
 	}
