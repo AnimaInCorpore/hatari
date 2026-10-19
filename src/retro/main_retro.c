@@ -9,8 +9,12 @@
 #include "main_retro.h"
 #include "hatari-glue.h"
 #include "dialog.h"
+#include "disk_control.h"
+#include "file.h"
 #include "floppy.h"
+#include "memorySnapShot.h"
 #include "m68000.h"
+#include "options.h"
 #include "reset.h"
 #include "screen.h"
 #include "sound.h"
@@ -18,18 +22,51 @@
 #include "vdi.h"
 #include "version.h"
 
-static bool has_cpu_config_changed = true;
+bool has_cpu_config_changed = true;
+const char *retro_save_directory;
+const char *retro_system_directory;
 
 retro_environment_t environment_cb;
 retro_video_refresh_t video_refresh_cb;
 retro_input_poll_t input_poll_cb;
 retro_input_state_t input_state_cb;
 
+#define SAVESTATE_TMP_NAME "hatari_savestate.tmp"
+static char scratch_path[FILENAME_MAX];
+
+static void Retro_SetInputDescriptors(void)
+{
+	static struct retro_input_descriptor desc[] =
+	{
+		/* Port 0 -> ST Joystick 1 (default) */
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,    "Up" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "Down" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "Left" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT, "Right" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,     "Fire" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,     "Fire 2 / Jump" },
+		{ 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,     "Fire 3" },
+
+		/* Port 1 -> ST Joystick 0 */
+		{ 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,    "Up" },
+		{ 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "Down" },
+		{ 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "Left" },
+		{ 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_RIGHT, "Right" },
+		{ 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_B,     "Fire" },
+		{ 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y,     "Fire 2 / Jump" },
+		{ 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_A,     "Fire 3" },
+
+		{ 0 },
+	};
+
+	environment_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc);
+}
 
 RETRO_API void retro_set_environment(retro_environment_t cb)
 {
 	static enum retro_pixel_format pixelformat = RETRO_PIXEL_FORMAT_XRGB8888;
 	static bool no_game = true;
+	bool categories_supported = false;
 
 	environment_cb = cb;
 
@@ -38,6 +75,9 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
 
 	/* Hatari can start without game disks */
 	cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_game);
+
+	/* Register core options */
+	libretro_set_core_options(cb, &categories_supported);
 }
 
 RETRO_API void retro_set_video_refresh(retro_video_refresh_t cb)
@@ -63,13 +103,47 @@ RETRO_API unsigned retro_api_version(void)
 RETRO_API void retro_init(void)
 {
 	char name[] = "hatari";
-	char *argv[1] = { name };
+	char tos_arg[] = "--tos";
+	char tos_path[FILENAME_MAX];
+	char *argv[4];
+	const char *save_dir = NULL;
+	const char *system_dir = NULL;
 
+	/* Register disk control  */
+	DiskControl_Init();
+
+	if (environment_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &save_dir) && save_dir)
+		retro_save_directory = save_dir;
+
+	argv[0] = name;
+
+	if (environment_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &system_dir) && system_dir)
+	{
+		retro_system_directory = system_dir;
+
+		snprintf(tos_path, sizeof(tos_path), "%s%c%s",
+		         system_dir, PATHSEP, "tos.img");
+
+		argv[1] = tos_arg;
+		argv[2] = tos_path;
+		argv[3] = NULL;
+
+		Main_Init(3, argv);
+
+		return;
+	}
+
+	argv[1] = NULL;
 	Main_Init(1, (char **)argv);
+
+	/* Apply core options on top of defaults/loaded config */
+	Core_ApplyBootOptions();
+	Core_ApplyRuntimeOptions();
 }
 
 RETRO_API void retro_deinit(void)
 {
+	scratch_path[0] = '\0';
 	Main_UnInit();
 }
 
@@ -107,6 +181,15 @@ RETRO_API void retro_reset(void)
 
 RETRO_API void retro_run(void)
 {
+	bool options_updated = false;
+
+	if (environment_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &options_updated) &&
+	    options_updated)
+	{
+		/* re-apply updatable options */
+		Core_ApplyRuntimeOptions();
+	}
+
 	M68000_UnsetSpecial(SPCFLAG_BRK);
 
 	if (has_cpu_config_changed)
@@ -120,32 +203,85 @@ RETRO_API void retro_run(void)
 		quit_program = 0;
 		m68k_run();
 	}
-/*
+
 	int width, height, pitch;
 	uint32_t *pixels;
 
 	Screen_GetDimension(&pixels, &width, &height, &pitch);
 	video_refresh_cb(pixels, width, height, pitch);
-*/
 }
 
 RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device)
 {
 }
 
+static const char *Serialize_ScratchPath(void)
+{
+	if (!scratch_path[0])
+	{
+		if (retro_system_directory && retro_system_directory[0])
+			snprintf(scratch_path, sizeof(scratch_path), "%s%c%s",
+			         retro_system_directory, PATHSEP, SAVESTATE_TMP_NAME);
+		else
+			snprintf(scratch_path, sizeof(scratch_path), "%s", SAVESTATE_TMP_NAME);
+	}
+	return scratch_path;
+}
+
 RETRO_API size_t retro_serialize_size(void)
 {
-	return 0;
+	const char *path = Serialize_ScratchPath();
+	off_t size;
+
+	MemorySnapShot_Capture_Immediate(path, false);
+
+	size = File_Length(path);
+	return (size > 0) ? (size_t)size : 0;
 }
+
 
 RETRO_API bool retro_serialize(void *data, size_t size)
 {
-	return false;
+	const char *path = Serialize_ScratchPath();
+	uint8_t *buffer;
+	long file_size = 0;
+
+	MemorySnapShot_Capture_Immediate(path, false);
+
+	buffer = File_ReadAsIs(path, &file_size);
+	if (!buffer)
+	{
+		Log_Printf(LOG_WARN, "libretro: failed to capture save state.\n");
+		return false;
+	}
+
+	if ((size_t)file_size > size)
+	{
+		/* Frontend's buffer is smaller than the current state - it
+		 * needs to call retro_serialize_size() again and resize. */
+		free(buffer);
+		return false;
+	}
+
+	memcpy(data, buffer, file_size);
+	free(buffer);
+	return true;
 }
 
 RETRO_API bool retro_unserialize(const void *data, size_t size)
 {
-	return false;
+	const char *path = Serialize_ScratchPath();
+
+	if (!File_Save(path, (const uint8_t *)data, size, false))
+	{
+		Log_Printf(LOG_WARN, "libretro: failed to write scratch save state file.\n");
+		return false;
+	}
+
+	MemorySnapShot_Restore(path, false);
+	has_cpu_config_changed = true;
+
+	return true;
 }
 
 RETRO_API void retro_cheat_reset(void)
@@ -165,6 +301,14 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
 
 	Floppy_InsertDiskIntoDrive(0);
 
+	// insert disk B also
+	if (ConfigureParams.DiskImage.szDiskFileName[1][0])
+		Floppy_InsertDiskIntoDrive(1);
+
+	DiskControl_NewGame(game ? game->path : NULL);
+
+	Retro_SetInputDescriptors();
+
 	return true;
 }
 
@@ -176,6 +320,8 @@ RETRO_API bool retro_load_game_special(unsigned game_type, const struct retro_ga
 RETRO_API void retro_unload_game(void)
 {
 	Floppy_EjectDiskFromDrive(0);
+
+	DiskControl_UnInit();
 }
 
 RETRO_API unsigned retro_get_region(void)

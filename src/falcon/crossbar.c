@@ -1311,9 +1311,24 @@ void Crossbar_Recalculate_Clocks_Cycles(void)
 		crossbar.isDacMuted = 1;
 
 	if ((crossbar.int_freq_divider == 6) || (crossbar.int_freq_divider == 8) ||
-	    (crossbar.int_freq_divider == 10) || (crossbar.int_freq_divider >= 12)) {
+	    (crossbar.int_freq_divider == 10) || (crossbar.int_freq_divider >= 12))
 		crossbar.isDacMuted = 1;
+
+	if ( crossbar.isDacMuted )
+	{
 		LOG_TRACE(TRACE_CROSSBAR, "           DAC is muted\n");
+
+		/* Clear the DAC ring buffer to avoid sound artifacts (due to previous data in the buffer) */
+		/* when DAC will be un-muted */
+		memset(dac.buffer_left, 0, sizeof(dac.buffer_left));
+		memset(dac.buffer_right, 0, sizeof(dac.buffer_right));
+		dac.readPosition_float = 0;
+		dac.readPosition = 0;
+		dac.writePosition = (dac.readPosition+DACBUFFER_SIZE/2)%DACBUFFER_SIZE;
+	}
+	else
+	{
+		LOG_TRACE(TRACE_CROSSBAR, "           DAC is not muted\n");
 	}
 
 	// Compute Ratio between host computer sound frequency and Hatari's sound frequency.
@@ -1595,6 +1610,8 @@ static void Crossbar_setDmaPlay_Settings(void)
 	dmaPlay.frameLen = dmaPlay.frameEndAddr - dmaPlay.frameStartAddr;  /* TODO: Remove later */
 //	dmaPlay.frameCounter = crossbar.dmaPlay_CurrentFrameCount - crossbar.dmaPlay_CurrentFrameStart;
 	dmaPlay.frameCounter = 0;
+	dmaPlay.currentFrame = 0;						/* 1st frame is left if in stereo */
+//fprintf (stderr , "Crossbar_setDmaPlay_Settings cur_frame %d\n" , dmaPlay.currentFrame );
 
 	if (dmaPlay.frameEndAddr <= dmaPlay.frameStartAddr)
 	{

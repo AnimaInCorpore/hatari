@@ -155,16 +155,6 @@ static bool Control_InsertEvent(const char *event)
 		Keyboard.LButtonDblClk = 1;
 		return true;
 	}
-	if (strcmp(event, "rightdown") == 0) {
-		Keyboard.bRButtonDown |= BUTTON_MOUSE;
-		return true;
-	}
-	if (strcmp(event, "rightup") == 0) {
-		Keyboard.bRButtonDown &= ~BUTTON_MOUSE;
-		return true;
-	}
-	/* F030AUX: left button and relative motion, so a headless run can drive
-	 * a pointer the way the SDL window would (GuiEvent_HandleMouseMotion). */
 	if (strcmp(event, "leftdown") == 0) {
 		Keyboard.bLButtonDown |= BUTTON_MOUSE;
 		return true;
@@ -173,12 +163,31 @@ static bool Control_InsertEvent(const char *event)
 		Keyboard.bLButtonDown &= ~BUTTON_MOUSE;
 		return true;
 	}
+	if (strcmp(event, "rightdown") == 0) {
+		Keyboard.bRButtonDown |= BUTTON_MOUSE;
+		return true;
+	}
+	if (strcmp(event, "rightup") == 0) {
+		Keyboard.bRButtonDown &= ~BUTTON_MOUSE;
+		return true;
+	}
 	if (strncmp(event, "mousemove ", 10) == 0) {
-		int dx = 0, dy = 0;
-		if (sscanf(event + 10, "%d %d", &dx, &dy) != 2) {
-			fprintf(stderr, "ERROR: 'mousemove' needs two integers, got '%s'\n", event + 10);
+		char *endptr;
+		int dx, dy;
+		dx = strtol(&event[10], &endptr, 0);
+		if (endptr == &event[10] || !*endptr) {
+			fprintf(stderr, "ERROR: '%s' needs two integer arguments\n", event);
 			return false;
 		}
+		dy = strtol(endptr, &endptr, 0);
+		if (*endptr) {
+			fprintf(stderr, "ERROR: '%s' needs two integer arguments\n", event);
+			return false;
+		}
+		/* Relative motion, in emulated screen pixels. The mouse can be
+		 * positioned absolutely by first pinning it into a corner with
+		 * a large negative move (the OS clamps at the screen edges) and
+		 * then moving by the wanted coordinates. */
 		KeyboardProcessor.Mouse.dx += dx;
 		KeyboardProcessor.Mouse.dy += dy;
 		return true;
@@ -190,10 +199,10 @@ static bool Control_InsertEvent(const char *event)
 	fprintf(stderr,
 		"Supported mouse button and key events are:\n"
 		"- doubleclick\n"
-		"- rightdown\n"
-		"- rightup\n"
 		"- leftdown\n"
 		"- leftup\n"
+		"- rightdown\n"
+		"- rightup\n"
 		"- mousemove <dx> <dy>\n"
 		"- keypress <key>\n"
 		"- keydown <key>\n"
@@ -201,7 +210,7 @@ static bool Control_InsertEvent(const char *event)
 		"<key> can be either a single ASCII character or an ST scancode\n"
 		"(e.g. space has scancode of 57 and enter 28).\n"
 		);
-	return false;	
+	return false;
 }
 
 /*-----------------------------------------------------------------------*/
