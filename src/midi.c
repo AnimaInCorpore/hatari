@@ -31,6 +31,7 @@ const char Midi_fileid[] = "Hatari midi.c";
 #include "memorySnapShot.h"
 #include "mfp.h"
 #include "midi.h"
+#include "midinet.h"
 #include "file.h"
 #include "acia.h"
 #include "video.h"
@@ -341,6 +342,8 @@ void Midi_InterruptHandler_Update(void)
  */
 static bool Midi_Host_Open(void)
 {
+	if (ConfigureParams.Midi.sMidiNetIn[0] || ConfigureParams.Midi.sMidiNetOut[0])
+		return MidiNet_Open(ConfigureParams.Midi.sMidiNetIn, ConfigureParams.Midi.sMidiNetOut);
 #ifndef HAVE_PORTMIDI
 	LOG_TRACE_VAR int ok;
 	if (ConfigureParams.Midi.sMidiOutFileName[0])
@@ -401,6 +404,11 @@ static bool Midi_Host_Open(void)
  */
 static void Midi_Host_Close(void)
 {
+	if (MidiNet_IsActive())
+	{
+		MidiNet_Close();
+		return;
+	}
 #ifndef HAVE_PORTMIDI
 	pMidiFhIn = File_Close(pMidiFhIn);
 	pMidiFhOut = File_Close(pMidiFhOut);
@@ -584,6 +592,8 @@ static void Midi_LogError(PmError error)
  */
 static int Midi_Host_ReadByte(void)
 {
+	if (MidiNet_IsActive())
+		return MidiNet_ReadByte();
 #ifndef HAVE_PORTMIDI
 	if (pMidiFhIn && File_InputAvailable(pMidiFhIn))
 	{
@@ -642,6 +652,8 @@ static int Midi_Host_ReadByte(void)
  */
 static bool Midi_Host_WriteByte(uint8_t byte)
 {
+	if (MidiNet_IsActive())
+		return MidiNet_WriteByte(byte);
 #ifndef HAVE_PORTMIDI
 	if (pMidiFhOut)
 	{

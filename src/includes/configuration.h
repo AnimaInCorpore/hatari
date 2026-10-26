@@ -365,6 +365,8 @@ typedef struct
   char sMidiOutFileName[FILENAME_MAX];
   char sMidiInPortName[MAX_MIDI_PORT_NAME];
   char sMidiOutPortName[MAX_MIDI_PORT_NAME];
+  char sMidiNetIn[MAX_MIDI_PORT_NAME];		/* midinet.c: [host:]port to listen on for MIDI IN */
+  char sMidiNetOut[MAX_MIDI_PORT_NAME];		/* midinet.c: host:port to connect MIDI OUT to */
 } CNF_MIDI;
 
 

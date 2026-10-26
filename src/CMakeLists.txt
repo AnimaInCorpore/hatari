@@ -45,6 +45,7 @@ set(SOURCES
 	memorySnapShot.c
 	mfp.c
 	midi.c
+	midinet.c
 	ncr5380.c
 	nf_scsidrv.c
 	options.c

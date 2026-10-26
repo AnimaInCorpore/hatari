@@ -148,6 +148,8 @@ typedef enum {
 #else
 	OPT_MIDI_IN,
 	OPT_MIDI_OUT,
+	OPT_MIDI_NET_IN,
+	OPT_MIDI_NET_OUT,
 #endif
 	OPT_RS232_IN,
 	OPT_RS232_OUT,
@@ -406,6 +408,10 @@ static const opt_t HatariOptions[] = {
 	{ OPT_MIDI_OUT,  NULL, "--midi-out",
 	  "<file>", "Enable MIDI and use <file> as the output device" },
 #endif
+	{ OPT_MIDI_NET_IN,   NULL, "--midi-net-in",
+	  "<[host:]port>", "Enable MIDI, MIDI IN from a TCP connection accepted on <port>" },
+	{ OPT_MIDI_NET_OUT,  NULL, "--midi-net-out",
+	  "<host:port>", "Enable MIDI, MIDI OUT to a TCP connection to <host:port>" },
 	{ OPT_RS232_IN,  NULL, "--rs232-in",
 	  "<file>", "Enable serial port and use <file> as the input device" },
 	{ OPT_RS232_OUT, NULL, "--rs232-out",
@@ -1703,6 +1709,18 @@ bool Opt_ParseParameters(int argc, const char * const argv[], int *exitval)
 					&ConfigureParams.Midi.bEnableMidi);
 			break;
 #endif
+
+		case OPT_MIDI_NET_IN:
+			ok = Opt_StrCpy(OPT_MIDI_NET_IN, CHECK_NONE, ConfigureParams.Midi.sMidiNetIn,
+					arg, sizeof(ConfigureParams.Midi.sMidiNetIn),
+					&ConfigureParams.Midi.bEnableMidi);
+			break;
+
+		case OPT_MIDI_NET_OUT:
+			ok = Opt_StrCpy(OPT_MIDI_NET_OUT, CHECK_NONE, ConfigureParams.Midi.sMidiNetOut,
+					arg, sizeof(ConfigureParams.Midi.sMidiNetOut),
+					&ConfigureParams.Midi.bEnableMidi);
+			break;
 
 		case OPT_RS232_IN:
 			ok = Opt_StrCpy(OPT_RS232_IN, CHECK_FILE, ConfigureParams.RS232.szInFileName,
