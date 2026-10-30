@@ -8364,7 +8364,7 @@ uae_u8 *restore_cpu (uae_u8 *src)
 					regs.prefetch020_valid[i] = false;
 				}
 			}
-		} else if (model == 68040) {
+		} else if (model >= 68040) {
 			if (flags & 0x8000000) {
 				for (int i = 0; i < ((model == 68060 && (flags & 0x4000000)) ? CACHESETS060 : CACHESETS040); i++) {
 					for (int j = 0; j < CACHELINES040; j++) {
