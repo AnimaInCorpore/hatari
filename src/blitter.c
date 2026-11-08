@@ -337,10 +337,18 @@ int	Blitter_StatsGetRate ( void )
 
 /*-----------------------------------------------------------------------*/
 /**
- * Count blitter cycles (this assumes blitter and CPU runs at the same freq)
+ * Count Blitter bus cycles in the current CPU clock domain.
+ * The Mega STE Blitter stays at 8 MHz when its CPU switches to 16 MHz.
  */
 static void Blitter_AddCycles(int cycles)
 {
+	/* Transfer and arbitration constants above are 8 MHz bus cycles.
+	 * WaitStateCycles already contains CPU cycles; do not scale it again.
+	 * pass_cycles must also use CPU cycles for the parallel-CPU accounting.
+	 * See doc/megaste-blitter-timing.txt for hardware measurements and limits.
+	 */
+	if ( ConfigureParams.System.nMachineType == MACHINE_MEGA_STE )
+		cycles <<= nCpuFreqShift;
 	int all_cycles = cycles + WaitStateCycles;
 
 	BlitterVars.op_cycles += all_cycles;

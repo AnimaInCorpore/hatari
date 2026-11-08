@@ -1441,6 +1441,18 @@ static bool	MegaSTE_Cache_Read ( uint32_t Addr , int Size , uint16_t *pVal )
  *
  */
 
+/* These wrappers run only for the Mega STE's 16 MHz CPU. The Blitter
+ * register interface remains on the 8 MHz peripheral clock even though IO
+ * is mapped as FAST16. Four peripheral cycles therefore take eight CPU
+ * cycles. Other FAST16 regions and cache hits retain their existing costs.
+ * Confirmed with Darklord's BLITTIME register/RAM controls; see
+ * doc/megaste-blitter-timing.txt. No start-countdown adjustment is involved.
+ */
+static int MegaSTE_FastAccessCycles ( uaecptr addr )
+{
+	return ( ( addr & 0x00ffffc0 ) == 0x00ff8a00 ) ? 8 : 4;
+}
+
 uae_u32	mem_access_delay_word_read_megaste_16 (uaecptr addr)
 {
 	uint16_t v;
@@ -1472,7 +1484,7 @@ uae_u32	mem_access_delay_word_read_megaste_16 (uaecptr addr)
 		if ( !MegaSTE_Cache_Is_Enabled() )
 		{
 			v = get_word (addr);
-			x_do_cycles_post (4 * cpucycleunit, v);
+			x_do_cycles_post (MegaSTE_FastAccessCycles (addr) * cpucycleunit, v);
 		}
 		else
 		{
@@ -1484,7 +1496,7 @@ uae_u32	mem_access_delay_word_read_megaste_16 (uaecptr addr)
 			else
 			{
 				v = get_word (addr);
-				x_do_cycles_post (4 * cpucycleunit, v);
+				x_do_cycles_post (MegaSTE_FastAccessCycles (addr) * cpucycleunit, v);
 				MegaSTE_Cache_Update ( addr , 2 , v , 0 );
 				CpuInstruction.D_Cache_miss++;
 			}
@@ -1533,7 +1545,7 @@ uae_u32	mem_access_delay_wordi_read_megaste_16 (uaecptr addr)
 		if ( !MegaSTE_Cache_Is_Enabled() )
 		{
 			v = get_wordi (addr);
-			x_do_cycles_post (4 * cpucycleunit, v);
+			x_do_cycles_post (MegaSTE_FastAccessCycles (addr) * cpucycleunit, v);
 		}
 		else
 		{
@@ -1545,7 +1557,7 @@ uae_u32	mem_access_delay_wordi_read_megaste_16 (uaecptr addr)
 			else
 			{
 				v = get_wordi (addr);
-				x_do_cycles_post (4 * cpucycleunit, v);
+				x_do_cycles_post (MegaSTE_FastAccessCycles (addr) * cpucycleunit, v);
 				MegaSTE_Cache_Update ( addr , 2 , v , 0 );
 				CpuInstruction.I_Cache_miss++;
 			}
@@ -1599,7 +1611,7 @@ uae_u32	mem_access_delay_byte_read_megaste_16 (uaecptr addr)
 		if ( !MegaSTE_Cache_Is_Enabled() )
 		{
 			v = get_byte (addr);
-			x_do_cycles_post (4 * cpucycleunit, v);
+			x_do_cycles_post (MegaSTE_FastAccessCycles (addr) * cpucycleunit, v);
 		}
 		else
 		{
@@ -1611,7 +1623,7 @@ uae_u32	mem_access_delay_byte_read_megaste_16 (uaecptr addr)
 			else
 			{
 				v = get_byte (addr);
-				x_do_cycles_post (4 * cpucycleunit, v);
+				x_do_cycles_post (MegaSTE_FastAccessCycles (addr) * cpucycleunit, v);
 				MegaSTE_Cache_Update ( addr , 1 , v , 0 );
 				CpuInstruction.D_Cache_miss++;
 			}
@@ -1648,7 +1660,7 @@ void	mem_access_delay_byte_write_megaste_16 (uaecptr addr, uae_u32 v)
 	case CE_MEMBANK_FAST16:
 	case CE_MEMBANK_FAST32:
 		put_byte (addr, v);
-		x_do_cycles_post (4 * cpucycleunit, v);
+		x_do_cycles_post (MegaSTE_FastAccessCycles (addr) * cpucycleunit, v);
 		if ( MegaSTE_Cache_Is_Enabled() )
 			MegaSTE_Cache_Write ( addr , 1 , v );
 
@@ -1678,7 +1690,7 @@ void	mem_access_delay_word_write_megaste_16 (uaecptr addr, uae_u32 v)
 	case CE_MEMBANK_FAST16:
 	case CE_MEMBANK_FAST32:
 		put_word (addr, v);
-		x_do_cycles_post (4 * cpucycleunit, v);
+		x_do_cycles_post (MegaSTE_FastAccessCycles (addr) * cpucycleunit, v);
 		if ( MegaSTE_Cache_Is_Enabled() )
 			MegaSTE_Cache_Write ( addr , 2 , v );
 

@@ -1,0 +1,236 @@
+Mega STE Blitter clock-domain correction (2026-11-08)
+==================================================
+
+Status: both the missing transfer-clock conversion and the uncached Blitter
+register-access clock cost are corrected locally, supported by Darklord's
+focused hardware return. Sub-percent elapsed differences remain; this is not
+a claim of cycle-exact Mega STE Blitter timing. No upstream submission made.
+
+Evidence
+--------
+Darklord returned STEArcade DLTEST 4 results from a 4 MiB Mega STE, TOS 2.06.
+CPU mode readbacks were $20, $26, $27 (low mode bits 0, 2, 3), unchanged at
+each mode's end. All drawing checks passed, including zero post-start NOPs.
+All six fixed bob/open-border BMPs matched Hatari and independent CPU renders.
+
+The setup test repeats 65,536 short HOG passes per profile. Each pass has
+four source reads, eight masked destination reads, eight destination writes:
+20 word accesses, 80 cycles of the 8 MHz bus, plus arbitration. Five profiles
+add 0, 1, 2, 4 or 8 NOPs after starting the Blitter. Kind 0 writes destination,
+Y count and control; kind 1 immediately reads/modifies/writes the Blitter's
+advanced destination after starting it. Nominal 28/32 instruction-cycle labels
+exclude memory waits, loop overhead, transfer and arbitration. Reported times
+are aggregate CPU-plus-Blitter elapsed TOS 200 Hz ticks, not setup cycles.
+
+Zero-NOP results (one tick = 5 ms):
+
+                             Hardware       Original Hatari   Clock corrected
+                             kind0 kind1    kind0 kind1       kind0 kind1
+8 MHz                        248   235      249   234         249   234
+16 MHz, cache off            242   235      153   153         226   226
+16 MHz, cache on             241   234      153   153         226   226
+
+The saved original full-suite cache-on kind0 result was 152 ticks; a focused
+rerun gives 153. This one-tick variation does not affect the diagnosis.
+For cache-on, all five NOP profiles, in order 0/1/2/4/8:
+
+                    Hardware                 Original             Corrected
+kind0               241 247 254 268 294        153 160 166 179 206    226 232 240 252 279
+kind1               234 241 247 261 288        153 160 166 179 206    226 232 240 252 279
+
+At 8 MHz all ten corrected/original profiles are identical, and within one
+tick of hardware in this run. A private unmodified rebuild reproduces the
+original binary's results exactly, excluding a compiler/build-option cause.
+
+Cause and scope of the correction
+---------------------------------
+clocks_timings.c explicitly models CPU_Freq = CLK16, BUS_Freq = CLK8 and
+BLITTER_Freq = CLK8 on Mega STE. CPU_Freq_Emul follows the selected CPU clock.
+However, Blitter_AddCycles() added its fixed 4-cycle read/write and 8/4-cycle
+Mega STE grant/release costs directly to the CPU-clock counters without
+conversion. Its old comment explicitly assumed CPU and Blitter ran at the
+same frequency. At 16 MHz that incorrectly halves their elapsed duration.
+
+Blitter_AddCycles() now converts these bus cycles with nCpuFreqShift only
+for Mega STE. WaitStateCycles is already in CPU units and is added afterward.
+op_cycles, pass_cycles and the CPU-parallel overlap allowance consequently
+remain in CPU units. STE, Falcon and other machine models are untouched.
+The correction does not write $FF8E21 or reduce the requested CPU speed.
+
+For this payload, transfer plus grant/release is 80+8+4 = 92 bus cycles.
+At 16 MHz that must be 184 CPU cycles, not 92. The raw missing-time prediction
+is about 75 ticks over 65,536 passes. Observed change is 73-74 ticks, with
+memory-slot alignment and overlap also changing. This explains most of the
+81-89 tick hardware/emulator gap; do not describe the entire gap as fixed.
+
+Cache being enabled offers little benefit to these tiny, frequent passes:
+every grant to the Blitter invalidates the external unified cache. This is
+already modeled by MegaSTE_Cache_Flush() in Blitter_BusArbitration(). Christian
+Zietz independently measured BGACK clearing the entire cache, as documented at:
+https://sourceforge.net/p/emutos/mailman/emutos-devel/thread/1986855.QoyOYrfykO@earendil/
+The official Hatari clock source also records the two distinct clock domains:
+https://hatari.frama.io/hatari/doxygen/clocks__timings_8c_source.html
+
+Remaining work and rejected experiment
+-------------------------------------
+Corrected cache-on results are still 15 ticks early for kind0 and eight ticks
+early for kind1 at zero NOPs (about 6.2% and 3.4% of hardware elapsed time).
+The residual is almost constant across added-NOP profiles. It is consistent
+with a per-pass start/arbitration/prefetch or bus-slot discrepancy, but this
+return does not isolate which of those is responsible.
+
+Do not simply double Blitter_CyclesBeforeStart = 4+4. A separate experiment
+doing that as well as the bus conversion produced 1,032 bad words in cache-on
+kind1 with zero NOPs; hardware and the retained correction both have zero.
+The start-countdown includes completion of the current CPU bus access, not
+just independent Blitter time. Its ordering needs a dedicated hardware probe.
+That experiment was discarded; it is not in the authoritative source.
+
+Reproduction and validation
+---------------------------
+STEArcade tools/dltest_setup_timing.py builds the same original setup kernels
+with a SETUP_ONLY launcher, bypassing unrelated long stages. Invoke with:
+
+  venv/bin/python tools/dltest_setup_timing.py --hatari /path/to/hatari \
+      --out build/setup-clock --hardware /path/to/DLTEST.TXT
+
+It verifies all 30 profile identities and zero bad words, and retains the
+guest report, emulator/TOS/executable/kernel hashes and tick differences in
+setup-timing.json. Production DLTEST builds omit SETUP_ONLY.
+
+Baseline source: fa969946e7915a93d3878dc9c9750d136eb84144.
+Original local binary SHA256:
+  3e7a034b2071c611bc62f039b6b0c5312ab433bb04acec83ca9c8798d40bb922
+Corrected local binary SHA256:
+  1718f34824d7280a3f7e58ef8e1ecdd6152a07f34f37df370803c7229b893567
+Raw returned report SHA256 and per-run identities are in the retained JSONs
+under STEArcade build/darklord-setup-investigation/; these are local artifacts.
+
+Validation: Hatari ctest blitter and cycles-exact pass. The shared STEArcade
+cache-on border test, five seconds idle plus five seconds mixed HOG drawing,
+has 493 post-picture samples, zero missing after warmup, 496 warmed top and
+496 bottom pulses in their accepted windows; both monitor captures match the
+CPU reference outside the countdown. Traced CPU writes are [0,3,0] (setup,
+target, restore). This is an emulator regression check, separate from the
+physical machine's 300-VBL cache-on run with zero missing callbacks.
+
+The full unattended DLTEST also passes in all three modes on the corrected
+authoritative binary: 94,176 matrix cases, 30 setup profiles, 96 bob scenes,
+CPU/RAM/file/palette/input-load checks and six independent CPU BMP comparisons.
+No new hardware run is implied by this emulator regression result.
+
+Follow-up: register-access timing candidate and hardware probe
+-------------------------------------------------------------
+STEArcade now provides a separate small BLITTIME.TOS, built by
+tools/blittime.py. Its operator instructions/design are in that repository's
+docs/blittime-instructions.txt and docs/blittime.md. The hardware archive is
+build/blittime/BLITTIME.ZIP. It requires no input, screen changes or game ROMs.
+It has 65 profiles, two repeats in each of the three CPU modes, 16,384 passes
+per profile: 390 measurements, each with full private destination/guard checks.
+
+The probe compares normal TOS handlers with minimal Timer C/VBL handlers;
+80/160/240-cycle masked payloads; byte/word/BSET starts; immediate/fenced
+destination RMW; full-copy payloads; idle Blitter-register writes; and the same
+idle loop writing ordinary RAM. A free-running Timer A at /200 (81.38 us/count)
+with an overflow ISR measures elapsed time independently of TOS's 200 Hz
+clock. Atomic snapshots include pending rollovers. Each CPU mode also has
+a one-second cross-calibration. Console, guard checks and disk I/O are outside
+timed intervals. Timer A must be inactive with no pending/in-service interrupt.
+CPU speed and cache remain selected for each whole mode.
+
+New evidence from the bus-clock-corrected emulator: cached idle register stores
+take about 3.38 us/pass, versus 5.01 for the same stores to ordinary RAM.
+cpu/memory.c maps IO as CE_MEMBANK_FAST16 using an STF timing observation.
+The Mega STE 16 MHz access wrappers in m68000.c still use four CPU cycles for
+that uncacheable FAST16 region. Four CPU cycles at 16 MHz are only two cycles
+of the 8 MHz peripheral clock. The new idle controls isolate this from Blitter
+transfer/grant timing and cache invalidation.
+
+A PRIVATE candidate changes that cost to eight CPU cycles only for addresses
+$FF8A00-$FF8A3F in the Mega STE 16 MHz wrappers. No other peripheral regions,
+CPU modes or start countdowns are changed. Using the ORIGINAL DLTEST kernels:
+
+Cached mode; ticks for NOPs 0/1/2/4/8
+Family                 Darklord                  MMIO candidate
+Destination writes     241 247 254 268 294         239 246 253 266 292
+Immediate RMW          234 241 247 261 288         233 240 246 259 286
+
+All 30 original setup profiles still have zero bad words. Uncached 16 MHz
+profiles are within 1-3 ticks of hardware; 8 MHz is unchanged. This explains
+nearly all of the remaining discrepancy, but is not a hardware measurement
+of the register handshake or justification to slow every IO region.
+
+The candidate and selected authoritative binary both pass the final 390-row
+probe, including all output/guard checks and clock comparisons. The candidate
+idle register cost is about 4.38 us/pass; the RAM control remains about 5.01.
+Normal/minimal IRQ results differ by roughly 1-2% for the short cached kernels
+in these emulator runs, another reason to collect both policies on hardware.
+That does not establish the cause of the last 1-2 ticks in Darklord's old run.
+
+BLITTIME.ZIP includes HATREF.TXT (selected authoritative emulator) and
+MMIOREF.TXT (private candidate), both from the same executable/build ID. They
+are comparison signatures, not prescribed hardware timings. Darklord returns
+BLITTIME.TXT and BUILD.JSN. A larger idle-MMIO cost on hardware with a matching
+RAM control would support the missing peripheral-wait hypothesis; a
+payload-proportional gap or policy-dependent gap points elsewhere.
+
+At initial packaging the additional MMIO correction was not installed pending
+the targeted hardware return. The following results validate its promotion.
+The experiment's patch/results are in STEArcade build/blittime-investigation/.
+Do not merge the earlier rejected start-countdown scaling with this correction.
+
+Focused hardware return: register timing confirmed
+--------------------------------------------------
+Darklord returned BLIT.ZIP with BLITTIME.TXT and BUILD.JSN. Metadata exactly
+matches the delivered build ecea4b1a94d50645. All 390 ordered measurements and
+both repeats complete with zero bad words, and speed/cache mode bits agree
+before and after each case. All three independent clock calibrations pass.
+
+The hardware display is approximately 60 Hz: each calibration has 200 TOS
+ticks and 60 VBLs. The emulator references are 50 Hz. The host analyser's
+fixed 50 Hz assertion was wrong because the native probe preserves the
+desktop video mode; it now infers a consistent 50/60/71 Hz rate. There is no
+native-program error or need to repeat the hardware run for that correction.
+The largest hardware MFP/TOS elapsed disagreement is 4.727 ms, below one
+200 Hz tick. Repeated elapsed samples differ by at most 0.01987 us/pass.
+
+Cached 16 MHz, minimal IRQ policy, means in us/pass:
+                                  Hardware   Bus-clock-only   MMIO corrected
+Idle Blitter register stores      4.3834     3.3776           4.3809
+Same stores to ordinary RAM       5.0068     5.0068           5.0068
+Masked 80-cycle destination loop 18.0354    17.0221          18.0279
+Masked 80-cycle immediate RMW    17.5362    17.0221          17.5262
+
+The missing idle-MMIO cost is about 1.006 us/pass: four word/byte bus accesses
+need four additional 16 MHz CPU cycles each. This isolates the interface
+cost without transfer/arbitration. The unchanged RAM control excludes a
+general CPU-clock error. Across all minimal-IRQ profiles and both repeats,
+hardware versus the private MMIO candidate differs by at most 0.153% uncached
+and 0.142% cached at 16 MHz. Eight MHz results stay within 0.374% overall.
+
+The MMIO correction is now installed in m68000.c as MegaSTE_FastAccessCycles.
+It charges eight CPU cycles only for uncached FAST16 accesses in the Blitter
+aperture ($FF8A00-$FF8A3F), and only within the Mega STE 16 MHz wrappers.
+Eight read/write paths use the helper. Cache hits retain four CPU cycles;
+ROM/cartridge, other IO, 8 MHz and other machines retain their prior costs.
+The start countdown is unchanged. The private candidate redundantly checked
+the same aperture on cache-hit paths; the installed version omits those
+unreachable conditions for IO and is equivalent on the measured paths.
+
+Cached normal-IRQ hardware measurements still differ from the candidate by
+about 0.6% on average by percentage (maximum 0.715%). Reference/hardware video
+rates differ (50/60 Hz), and normal TOS/driver handler work is not controlled.
+Do not attribute that last difference solely to video rate or promise cycle
+exactness. The minimal-IRQ controls support the narrow access-cost correction.
+
+Raw return, stats and post-promotion regression results are retained in
+STEArcade build/darklord-blittime-2026-11-08/. Original input files are intact.
+
+Post-promotion validation: the exact delivered 390-row executable passes on
+the rebuilt authoritative binary, as does the full DLTEST (94,176 matrix
+cases, all CPU/RAM/file/palette/scene checks, six independent CPU BMP matches).
+CTest blitter/cycles-exact pass. Five seconds idle plus five loaded in the
+cached border test has zero missing callbacks, matching monitor captures
+and control writes [0,3,0]. The binary identity is in those JSON reports and
+the parent repository's machine-local hatari.md. The host analyser now has
+regressions for the returned 60 Hz calibrations, 50/71 Hz and invalid clocks.
