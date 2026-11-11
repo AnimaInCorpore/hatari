@@ -866,6 +866,85 @@ static void Blitter_Step(void)
 
 
 /*-----------------------------------------------------------------------*/
+/*
+ * 68020/68030 in cycle exact mode : cpu running in parallel to the blitter
+ *
+ * The blitter takes the bus, not the cpu's clock : a 68030 goes on with what it
+ * needs no bus for (instructions fetched from its cache, working on registers) and
+ * is stalled at its next bus access until the blitter gives the bus back.
+ * The whole transfer is emulated at once, its cycles added to the clocks (as in
+ * every mode but 68000 CE) ; here the cpu cycles that follow are then not counted
+ * again, up to the transfer's length and up to the cpu's next bus access, whichever
+ * comes first (same idea as BLITTER_PHASE_IGNORE_LAST_CPU_CYCLES for the 68000).
+ * Limits : the instructions executed "in parallel" run after the transfer in
+ * emulation order (they access no bus by definition ; a data cache hit counts as
+ * no bus access too) ; interrupts are taken after the transfer.
+ * Set the environment variable HATARI_BLITTER_NO_CPU_OVERLAP to disable this.
+ */
+int		Blitter_CPU030_ParallelCycles = 0;		/* cycles the cpu may still run "for free" */
+int		Blitter_CPU030_Active = 0;			/* InstrEnd must be called for the current instruction */
+static int	Blitter_CPU030_BaseCycles = 0;			/* cycles of the current instruction counted before the transfer */
+static int	Blitter_CPU030_SkipCycles = 0;			/* cycles of the current instruction that ran in parallel */
+static int	Blitter_CPU030_Disabled = -1;
+
+static void	Blitter_CPU030_SetParallel ( int cycles )
+{
+	if ( Blitter_CPU030_Disabled < 0 )
+		Blitter_CPU030_Disabled = ( getenv ( "HATARI_BLITTER_NO_CPU_OVERLAP" ) != NULL ) ? 1 : 0;
+
+	if ( Blitter_CPU030_Disabled || !CpuRunCycleExact || ( currprefs.cpu_model < 68020 ) || ( cycles <= 0 ) )
+		return;
+
+	Blitter_CPU030_ParallelCycles = cycles;
+	Blitter_CPU030_BaseCycles = currcycle * 2 / CYCLE_UNIT;
+	Blitter_CPU030_Active = 1;
+}
+
+/**
+ * Called by the cpu emulation before a bus access (not for a cache hit) while
+ * Blitter_CPU030_ParallelCycles != 0 : the cpu was stalled from here.
+ * 'cycles' = cycles of the current instruction so far
+ */
+void	Blitter_CPU030_BusAccess ( int cycles )
+{
+	int	par = cycles - Blitter_CPU030_BaseCycles;
+
+	if ( par > Blitter_CPU030_ParallelCycles )
+		par = Blitter_CPU030_ParallelCycles;
+	if ( par > 0 )
+		Blitter_CPU030_SkipCycles += par;
+	Blitter_CPU030_ParallelCycles = 0;
+}
+
+/**
+ * Called by the cpu emulation at the end of an instruction of 'cycles' cycles
+ * while Blitter_CPU030_Active != 0 : return the cycles to count
+ */
+int	Blitter_CPU030_InstrEnd ( int cycles )
+{
+	if ( Blitter_CPU030_ParallelCycles )
+	{
+		int	par = cycles - Blitter_CPU030_BaseCycles;
+
+		if ( par > Blitter_CPU030_ParallelCycles )
+			par = Blitter_CPU030_ParallelCycles;
+		if ( par > 0 )
+		{
+			Blitter_CPU030_SkipCycles += par;
+			Blitter_CPU030_ParallelCycles -= par;
+		}
+	}
+	else
+		Blitter_CPU030_Active = 0;
+	Blitter_CPU030_BaseCycles = 0;
+
+	cycles -= Blitter_CPU030_SkipCycles;
+	Blitter_CPU030_SkipCycles = 0;
+	return cycles > 0 ? cycles : 0;
+}
+
+
+/*-----------------------------------------------------------------------*/
 /**
  * Start/Resume the blitter
  *
@@ -912,6 +991,9 @@ Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 
 	/* Bus arbitration */
 	Blitter_BusArbitration ( BUS_MODE_CPU );
+
+	/* 68020/68030 CE : the cpu could run from its cache during this pass */
+	Blitter_CPU030_SetParallel ( BlitterVars.pass_cycles );
 
 	BlitterRegs.ctrl = (BlitterRegs.ctrl & 0xF0) | BlitterVars.halftone_line;
 

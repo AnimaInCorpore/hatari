@@ -91,5 +91,11 @@ extern void Blitter_HOG_CPU_mem_access_after ( int bus_count );
 extern int  Blitter_Check_Simultaneous_CPU ( void );
 extern void Blitter_HOG_CPU_do_cycles_after ( int cycles );
 
+/* 68020/68030 cycle exact mode : cpu running from its cache while the blitter owns the bus */
+extern int  Blitter_CPU030_ParallelCycles;
+extern int  Blitter_CPU030_Active;
+extern void Blitter_CPU030_BusAccess ( int cycles );
+extern int  Blitter_CPU030_InstrEnd ( int cycles );
+
 
 #endif /* BLITTER_H */

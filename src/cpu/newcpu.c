@@ -7171,8 +7171,13 @@ fprintf ( stderr , "cache valid %d tag1 %x lws1 %x ctag %x data %x mem=%x\n" , c
 #ifdef WINUAE_FOR_HATARI
 //fprintf ( stderr, "cyc_2ce %d\n" , currcycle );
 				/* Flush all CE cycles so far to update PendingInterruptCount */
-				M68000_AddCycles_CE ( currcycle * 2 / CYCLE_UNIT );
-				int dsp_cycles = 2 * currcycle * 2 / CYCLE_UNIT;	// FIXME : remove this when using DSP_CyclesGlobalClockCounter in DSP_Run
+				/* (the cycles the cpu ran from its cache while the blitter owned the bus */
+				/* were counted with the blitter's, see Blitter_CPU030_InstrEnd) */
+				int instr_cycles = currcycle * 2 / CYCLE_UNIT;
+				if ( Blitter_CPU030_Active )
+					instr_cycles = Blitter_CPU030_InstrEnd ( instr_cycles );
+				M68000_AddCycles_CE ( instr_cycles );
+				int dsp_cycles = 2 * instr_cycles;	// FIXME : remove this when using DSP_CyclesGlobalClockCounter in DSP_Run
 				currcycle = 0;
 
 				/* We can have several interrupts at the same time before the next CPU instruction */
@@ -9412,11 +9417,19 @@ void mem_access_delay_word_write (uaecptr addr, uae_u32 v)
 
 static void start_020_cycle(void)
 {
+#ifdef WINUAE_FOR_HATARI
+	if ( Blitter_CPU030_ParallelCycles )
+		Blitter_CPU030_BusAccess ( currcycle * 2 / CYCLE_UNIT );
+#endif
 	regs.ce020startcycle = get_cycles();
 }
 
 static void start_020_cycle_prefetch(bool opcode)
 {
+#ifdef WINUAE_FOR_HATARI
+	if ( Blitter_CPU030_ParallelCycles )
+		Blitter_CPU030_BusAccess ( currcycle * 2 / CYCLE_UNIT );
+#endif
 	regs.ce020startcycle = get_cycles();
 	// back to back prefetch cycles require 2 extra cycles (maybe)
 	if (opcode && regs.ce020startcycle == regs.ce020prefetchendcycle && currprefs.cpu_cycle_exact) {
