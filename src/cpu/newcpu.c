@@ -10030,6 +10030,14 @@ static void fill_icache030(uae_u32 addr)
 
 	TRY (prb2) {
 		// cache miss
+#ifdef WINUAE_FOR_HATARI
+		/* Without MMU nothing sets the cache state for an instruction fetch : it was left */
+		/* by the last data write (mem_access_delay_*_write_ce030_cicheck), so the long fetched */
+		/* after a write to an IO register (not cachable) never entered the instruction cache. */
+		/* Use the cachability of the fetched address itself */
+		if (!currprefs.mmu_model)
+			mmu030_cache_state = ce_cachable[addr >> 16];
+#endif
 		if (currprefs.cpu_cycle_exact) {
 			regs.ce020memcycle_data = false;
 			start_020_cycle_prefetch(false);
