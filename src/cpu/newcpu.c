@@ -9419,7 +9419,7 @@ static void start_020_cycle(void)
 {
 #ifdef WINUAE_FOR_HATARI
 	if ( Blitter_CPU030_ParallelCycles )
-		Blitter_CPU030_BusAccess ( currcycle * 2 / CYCLE_UNIT );
+		Blitter_CPU030_BusAccess ();
 #endif
 	regs.ce020startcycle = get_cycles();
 }
@@ -9428,7 +9428,7 @@ static void start_020_cycle_prefetch(bool opcode)
 {
 #ifdef WINUAE_FOR_HATARI
 	if ( Blitter_CPU030_ParallelCycles )
-		Blitter_CPU030_BusAccess ( currcycle * 2 / CYCLE_UNIT );
+		Blitter_CPU030_BusAccess ();
 #endif
 	regs.ce020startcycle = get_cycles();
 	// back to back prefetch cycles require 2 extra cycles (maybe)

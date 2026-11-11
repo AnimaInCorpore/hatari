@@ -268,6 +268,8 @@ static int	BlitterStatsRate;
 /**
  * Reset all blitter variables
  */
+static void	Blitter_CPU030_Reset ( void );
+
 void Blitter_Reset ( void )
 {
 	BlitterRegs.src_addr = 0;
@@ -304,6 +306,8 @@ void Blitter_Reset ( void )
 	BlitterState.have_dst = false;
 	BlitterState.bus_word = 0;
 	BlitterState.ContinueLater = 0 ;
+
+	Blitter_CPU030_Reset ();
 }
 
 
@@ -867,32 +871,49 @@ static void Blitter_Step(void)
 
 /*-----------------------------------------------------------------------*/
 /*
- * 68020/68030 in cycle exact mode : cpu running in parallel to the blitter
+ * 68020/68030 in cycle exact mode without MMU : cpu running in parallel to the blitter
  *
  * The blitter takes the bus, not the cpu's clock : a 68030 goes on with what it
- * needs no bus for (instructions fetched from its cache, working on registers) and
- * is stalled at its next bus access until the blitter gives the bus back.
+ * needs no bus for (instructions fetched from its cache, working on registers,
+ * data cache read hits) and is stalled at its next bus access (any cache miss,
+ * any write : the data cache is write-through) until the blitter gives the bus back.
  * The whole transfer is emulated at once, its cycles added to the clocks (as in
  * every mode but 68000 CE) ; here the cpu cycles that follow are then not counted
  * again, up to the transfer's length and up to the cpu's next bus access, whichever
  * comes first (same idea as BLITTER_PHASE_IGNORE_LAST_CPU_CYCLES for the 68000).
- * Limits : the instructions executed "in parallel" run after the transfer in
- * emulation order (they access no bus by definition ; a data cache hit counts as
- * no bus access too) ; interrupts are taken after the transfer.
+ *
+ * - At a bus access the cycles that ran in parallel are taken out of the current
+ *   instruction's cycle count ('currcycle') at once, so the access is placed on
+ *   the bus (contention, alignment) at the time the blitter released it plus what
+ *   the cpu did after, not later.
+ * - Not with a MMU : m68k_run_mmu030 and the MMU memory functions are not hooked,
+ *   so no credit is given there (all cycles are counted as before).
+ * - Limit : interrupts raised by events during the transfer are taken right after
+ *   it, before the cpu work that ran in parallel is executed (and its credit is
+ *   then lost at the exception's stack writes). A real cpu would have been part
+ *   of the way through that work. Exact order needs the transfer emulated in steps.
+ *
  * Set the environment variable HATARI_BLITTER_NO_CPU_OVERLAP to disable this.
  */
 int		Blitter_CPU030_ParallelCycles = 0;		/* cycles the cpu may still run "for free" */
 int		Blitter_CPU030_Active = 0;			/* InstrEnd must be called for the current instruction */
 static int	Blitter_CPU030_BaseCycles = 0;			/* cycles of the current instruction counted before the transfer */
-static int	Blitter_CPU030_SkipCycles = 0;			/* cycles of the current instruction that ran in parallel */
 static int	Blitter_CPU030_Disabled = -1;
+
+static void	Blitter_CPU030_Reset ( void )
+{
+	Blitter_CPU030_ParallelCycles = 0;
+	Blitter_CPU030_Active = 0;
+	Blitter_CPU030_BaseCycles = 0;
+}
 
 static void	Blitter_CPU030_SetParallel ( int cycles )
 {
 	if ( Blitter_CPU030_Disabled < 0 )
 		Blitter_CPU030_Disabled = ( getenv ( "HATARI_BLITTER_NO_CPU_OVERLAP" ) != NULL ) ? 1 : 0;
 
-	if ( Blitter_CPU030_Disabled || !CpuRunCycleExact || ( currprefs.cpu_model < 68020 ) || ( cycles <= 0 ) )
+	if ( Blitter_CPU030_Disabled || !CpuRunCycleExact || ( currprefs.cpu_model < 68020 )
+	  || currprefs.mmu_model || ( cycles <= 0 ) )
 		return;
 
 	Blitter_CPU030_ParallelCycles = cycles;
@@ -903,16 +924,17 @@ static void	Blitter_CPU030_SetParallel ( int cycles )
 /**
  * Called by the cpu emulation before a bus access (not for a cache hit) while
  * Blitter_CPU030_ParallelCycles != 0 : the cpu was stalled from here.
- * 'cycles' = cycles of the current instruction so far
+ * The cycles of the current instruction that ran in parallel are removed from
+ * currcycle, so the bus access starts at the right time
  */
-void	Blitter_CPU030_BusAccess ( int cycles )
+void	Blitter_CPU030_BusAccess ( void )
 {
-	int	par = cycles - Blitter_CPU030_BaseCycles;
+	int	par = (int)( currcycle * 2 / CYCLE_UNIT ) - Blitter_CPU030_BaseCycles;
 
 	if ( par > Blitter_CPU030_ParallelCycles )
 		par = Blitter_CPU030_ParallelCycles;
 	if ( par > 0 )
-		Blitter_CPU030_SkipCycles += par;
+		currcycle -= (evt_t)par * CYCLE_UNIT / 2;
 	Blitter_CPU030_ParallelCycles = 0;
 }
 
@@ -930,7 +952,7 @@ int	Blitter_CPU030_InstrEnd ( int cycles )
 			par = Blitter_CPU030_ParallelCycles;
 		if ( par > 0 )
 		{
-			Blitter_CPU030_SkipCycles += par;
+			cycles -= par;
 			Blitter_CPU030_ParallelCycles -= par;
 		}
 	}
@@ -938,8 +960,6 @@ int	Blitter_CPU030_InstrEnd ( int cycles )
 		Blitter_CPU030_Active = 0;
 	Blitter_CPU030_BaseCycles = 0;
 
-	cycles -= Blitter_CPU030_SkipCycles;
-	Blitter_CPU030_SkipCycles = 0;
 	return cycles > 0 ? cycles : 0;
 }
 
@@ -1617,6 +1637,9 @@ void Blitter_MemorySnapShot_Capture(bool bSave)
 	MemorySnapShot_Store(&Blitter_HOG_CPU_BlitterStartDuringBusAccess, sizeof(Blitter_HOG_CPU_BlitterStartDuringBusAccess));
 	MemorySnapShot_Store(&Blitter_HOG_CPU_BusCountError, sizeof(Blitter_HOG_CPU_BusCountError));
 	MemorySnapShot_Store(&Blitter_HOG_CPU_IgnoreMaxCpuCycles, sizeof(Blitter_HOG_CPU_IgnoreMaxCpuCycles));
+	MemorySnapShot_Store(&Blitter_CPU030_ParallelCycles, sizeof(Blitter_CPU030_ParallelCycles));
+	MemorySnapShot_Store(&Blitter_CPU030_Active, sizeof(Blitter_CPU030_Active));
+	MemorySnapShot_Store(&Blitter_CPU030_BaseCycles, sizeof(Blitter_CPU030_BaseCycles));
 
 	if ( !bSave )
 	{
