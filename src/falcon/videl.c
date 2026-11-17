@@ -944,6 +944,19 @@ static int VIDEL_getScreenWidth(void)
 }
 
 /**
+ * How an RGB/TV monitor shows the lines of the current mode, for the CRT
+ * display shaders: 1 = one scanline per line, 2 = every line on two
+ * scanlines (line doubling), 0 = interlaced (both fields fill the gaps
+ * between the scanlines of the other).
+ */
+static int crtScansPerLine = 1;
+
+int VIDEL_GetCrtScansPerLine(void)
+{
+	return crtScansPerLine;
+}
+
+/**
  *  VIDEL_getScreenHeight : returns the visible Y resolution
  *	upper border + graphic area + lower border
  *	upper border : vdb - vbe
@@ -958,6 +971,10 @@ static int VIDEL_getScreenHeight(void)
 	uint16_t vdb = IoMem_ReadWord(0xff82a8) & 0x07ff;
 	uint16_t vde = IoMem_ReadWord(0xff82aa) & 0x07ff;
 	uint16_t vmode = IoMem_ReadWord(0xff82c2);
+
+	/* Kept for VIDEL_GetCrtScansPerLine(), which runs when I/O memory
+	 * may not exist yet. */
+	crtScansPerLine = (vmode & 0x02) ? 0 : (vmode & 0x01) ? 2 : 1;
 
 	/* According to Aura and Animal Mine doc about Videl, if a monochrome monitor is connected,
 	 * VDB and VDE have no significance and no border is displayed.

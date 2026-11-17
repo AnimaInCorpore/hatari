@@ -21,6 +21,7 @@ extern void VIDEL_VideoRasterHBL(void);
 extern void VIDEL_UpdateBusDemand(void);
 
 extern int VIDEL_Get_VFreq(void);
+extern int VIDEL_GetCrtScansPerLine(void);
 extern bool VIDEL_Use_STShifter(void);
 
 /* Called from ioMemTabFalcon.c */

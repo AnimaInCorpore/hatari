@@ -6,11 +6,19 @@
  * CRT stages: input gamma/dilation, sharp horizontal reconstruction, adaptive
  * scanline beam, RGB aperture grille, output gamma and brightness boost.
  *
- * Hatari uploads a complete logical Videl raster to SDL, so this pass runs on
- * that raster before SDL scales it.  The status bar is copied by screen.c
- * after this function returns and is therefore never part of the shader.
+ * Like the Hyllian pass it runs at the output resolution: the scanlines are
+ * gaps between the video lines and the mask is one output pixel wide.  The
+ * emulated raster is read in video pixels and lines (a raster the converter
+ * zoomed with nScreenZoomX/Y is read one zoomed pixel per video pixel), and
+ * the caller says how the monitor shows a line (one or two scanlines, or
+ * interlaced without gaps).  The status bar is drawn by screen.c.
+ *
+ * Gamma and dilation are tables, the horizontal reconstruction runs once per
+ * video line, and the scanline profile once per output row.
  */
 #include <math.h>
+#include <stdbool.h>
+#include <stdlib.h>
 
 #include "crt_easymode.h"
 
@@ -18,159 +26,259 @@
 #define EASYMODE_GAMMA_OUTPUT       1.8f
 #define EASYMODE_DILATION           1.0f
 #define EASYMODE_SHARPNESS_H        0.5f
-#define EASYMODE_SHARPNESS_V        1.0f
-#define EASYMODE_MASK_STRENGTH     0.30f
-#define EASYMODE_MASK_DOT_WIDTH     1
-#define EASYMODE_MASK_DOT_HEIGHT    1
-#define EASYMODE_MASK_STAGGER        0
+#define EASYMODE_MASK_STRENGTH      0.30f
 #define EASYMODE_SCANLINE_STRENGTH  1.0f
-#define EASYMODE_BEAM_WIDTH_MIN     1.5f
-#define EASYMODE_BEAM_WIDTH_MAX     1.5f
-#define EASYMODE_BRIGHT_MIN          0.35f
-#define EASYMODE_BRIGHT_MAX          0.65f
-#define EASYMODE_BRIGHT_BOOST        1.2f
-#define EASYMODE_SCANLINE_CUTOFF      400
+#define EASYMODE_BEAM_WIDTH         1.5f
+#define EASYMODE_BRIGHT_MIN         0.35f
+#define EASYMODE_BRIGHT_MAX         0.65f
+#define EASYMODE_BRIGHT_BOOST       1.2f
+#define EASYMODE_OUTPUT_LUT_SIZE    4096
 
-static float clamp01(float value)
+static float input_lut[256];
+static uint8_t output_lut[EASYMODE_OUTPUT_LUT_SIZE];
+static bool luts_ready;
+
+/* Geometry, rebuilt when a dimension changes. */
+static struct {
+	int dst_width, dst_height;
+	int src_width, src_height;
+	int zoom_x, zoom_y;
+	int scans_per_line;
+	int columns, lines;
+	int *taps;          /* left source column per output column */
+	float *frac;        /* sharpened position between it and the next */
+	int *rows;          /* video line per output row */
+	float *row_weight;  /* scanline weight per output row */
+	float *line_rgb;    /* reconstructed lines: lines x dst_width x 3 */
+	float *filtered;    /* one filtered video line: columns x 3 */
+} geo;
+
+static void init_luts(void)
 {
-	if (value < 0.0f)
-		return 0.0f;
-	if (value > 1.0f)
-		return 1.0f;
-	return value;
-}
+	int i;
 
-static float channel(uint32_t pixel, int shift)
-{
-	return (float)((pixel >> shift) & 255) / 255.0f;
-}
+	if (luts_ready)
+		return;
 
-static uint32_t rgb(float red, float green, float blue)
-{
-	return ((unsigned)(clamp01(red) * 255.0f + 0.5f) << 16) |
-	       ((unsigned)(clamp01(green) * 255.0f + 0.5f) << 8) |
-	       (unsigned)(clamp01(blue) * 255.0f + 0.5f);
-}
+	/* EasyMode's dilation col * mix(1, col, DILATION), then its input
+	 * gamma, which the dilation reduces. */
+	for (i = 0; i < 256; ++i) {
+		const float value = (float)i / 255.0f;
+		const float dilated = value * (1.0f + (value - 1.0f) * EASYMODE_DILATION);
 
-static uint32_t pixel_at(const uint32_t *src, int width, int height,
-	                       int pitch, int x, int y)
-{
-	const uint32_t *line;
+		input_lut[i] = powf(dilated, EASYMODE_GAMMA_INPUT /
+		                    (EASYMODE_DILATION + 1.0f));
+	}
+	/* Output transfer and the SC1224-friendly brightness boost. */
+	for (i = 0; i < EASYMODE_OUTPUT_LUT_SIZE; ++i) {
+		float value = powf((float)i / (EASYMODE_OUTPUT_LUT_SIZE - 1),
+		                   1.0f / EASYMODE_GAMMA_OUTPUT) * EASYMODE_BRIGHT_BOOST;
 
-	if (x < 0)
-		x = 0;
-	else if (x >= width)
-		x = width - 1;
-	if (y < 0)
-		y = 0;
-	else if (y >= height)
-		y = height - 1;
-
-	line = (const uint32_t *)((const unsigned char *)src + y * pitch);
-	return line[x];
-}
-
-static float dilate(float value)
-{
-	/* EasyMode's dilation is col * mix(1, col, DILATION). */
-	return value * (1.0f + (value - 1.0f) * EASYMODE_DILATION);
-}
-
-static float input_gamma(float value)
-{
-	return powf(clamp01(value),
-	            EASYMODE_GAMMA_INPUT / (EASYMODE_DILATION + 1.0f));
-}
-
-static float filtered_channel(const uint32_t *src, int width, int height,
-	                            int pitch, int x, int y, int shift)
-{
-	float center = input_gamma(dilate(channel(pixel_at(src, width, height,
-	                                                   pitch, x, y), shift)));
-	float left = input_gamma(dilate(channel(pixel_at(src, width, height,
-	                                                 pitch, x - 1, y), shift)));
-	float right = input_gamma(dilate(channel(pixel_at(src, width, height,
-	                                                  pitch, x + 1, y), shift)));
-	float vertical;
-	float blur = 0.16f * (1.0f - EASYMODE_SHARPNESS_H);
-
-	/* A small three-tap reconstruction is the inexpensive equivalent of the
-	 * EasyMode Lanczos path at a source-resolution output. */
-	center = center * (1.0f - 2.0f * blur) + (left + right) * blur;
-
-	if (EASYMODE_SHARPNESS_V < 1.0f) {
-		float above = input_gamma(dilate(channel(pixel_at(src, width, height,
-										 pitch, x, y - 1), shift)));
-		float below = input_gamma(dilate(channel(pixel_at(src, width, height,
-										 pitch, x, y + 1), shift)));
-		vertical = 0.04f * (1.0f - EASYMODE_SHARPNESS_V);
-		center = center * (1.0f - 2.0f * vertical) +
-		         (above + below) * vertical;
+		output_lut[i] = (uint8_t)((value > 1.0f ? 1.0f : value) * 255.0f + 0.5f);
 	}
 
-	return clamp01(center);
+	luts_ready = true;
 }
 
-void CRT_EasyMode_Process(uint32_t *dst, const uint32_t *src, int width,
-	                      int height, int src_pitch)
+static inline unsigned output(float value)
 {
-	int x, y;
+	int index = (int)(value * (EASYMODE_OUTPUT_LUT_SIZE - 1) + 0.5f);
 
-	for (y = 0; y < height; ++y) {
-		float scan_phase = 0.5f + 0.5f * cosf((float)y * 3.141592653589f);
-		float scan_beam = EASYMODE_BEAM_WIDTH_MIN;
+	if (index < 0)
+		index = 0;
+	else if (index >= EASYMODE_OUTPUT_LUT_SIZE)
+		index = EASYMODE_OUTPUT_LUT_SIZE - 1;
+	return output_lut[index];
+}
 
-		if (scan_beam > EASYMODE_BEAM_WIDTH_MAX)
-			scan_beam = EASYMODE_BEAM_WIDTH_MAX;
+static int clampi(int value, int low, int high)
+{
+	return value < low ? low : value > high ? high : value;
+}
 
-		for (x = 0; x < width; ++x) {
-			float red = filtered_channel(src, width, height, src_pitch, x, y, 16);
-			float green = filtered_channel(src, width, height, src_pitch, x, y, 8);
-			float blue = filtered_channel(src, width, height, src_pitch, x, y, 0);
-			float luma = red * 0.2126f + green * 0.7152f + blue * 0.0722f;
-			float bright = fmaxf(red, fmaxf(green, blue));
-			float scan_bright, scan_weight, mask;
-			int dot;
+static void free_geometry(void)
+{
+	free(geo.taps);
+	free(geo.frac);
+	free(geo.rows);
+	free(geo.row_weight);
+	free(geo.line_rgb);
+	free(geo.filtered);
+	geo.taps = NULL;
+	geo.frac = NULL;
+	geo.rows = NULL;
+	geo.row_weight = NULL;
+	geo.line_rgb = NULL;
+	geo.filtered = NULL;
+	geo.dst_width = 0;
+}
 
-			bright = (bright + luma) * 0.5f;
-			scan_bright = bright;
-			if (scan_bright < EASYMODE_BRIGHT_MIN)
-				scan_bright = EASYMODE_BRIGHT_MIN;
-			else if (scan_bright > EASYMODE_BRIGHT_MAX)
-				scan_bright = EASYMODE_BRIGHT_MAX;
+static bool update_geometry(int dst_width, int dst_height, int src_width,
+	                        int src_height, int zoom_x, int zoom_y,
+	                        int scans_per_line)
+{
+	const int repeat = scans_per_line > 0 ? scans_per_line : 1;
+	int scans, x, y;
 
-			scan_weight = 1.0f -
-			              powf(scan_phase, scan_beam) *
-			              EASYMODE_SCANLINE_STRENGTH;
-			if (height >= EASYMODE_SCANLINE_CUTOFF)
-				scan_weight = 1.0f;
-			red = red * scan_weight + red * scan_bright * (1.0f - scan_weight);
-			green = green * scan_weight + green * scan_bright * (1.0f - scan_weight);
-			blue = blue * scan_weight + blue * scan_bright * (1.0f - scan_weight);
+	if (geo.taps && geo.dst_width == dst_width && geo.dst_height == dst_height &&
+	    geo.src_width == src_width && geo.src_height == src_height &&
+	    geo.zoom_x == zoom_x && geo.zoom_y == zoom_y &&
+	    geo.scans_per_line == scans_per_line)
+		return true;
 
-			dot = (x / EASYMODE_MASK_DOT_WIDTH +
-			       ((y / EASYMODE_MASK_DOT_HEIGHT) & 1) *
-			       EASYMODE_MASK_STAGGER) % 3;
-			mask = 1.0f - EASYMODE_MASK_STRENGTH;
-			if (dot == 0) {
-				green *= mask;
-				blue *= mask;
-			} else if (dot == 1) {
-				red *= mask;
-				blue *= mask;
-			} else {
-				red *= mask;
-				green *= mask;
+	free_geometry();
+	geo.columns = src_width / zoom_x;
+	geo.lines = src_height / zoom_y;
+	if (geo.columns < 1 || geo.lines < 1)
+		return false;
+
+	geo.taps = malloc(sizeof(int) * dst_width);
+	geo.frac = malloc(sizeof(float) * dst_width);
+	geo.rows = malloc(sizeof(int) * dst_height);
+	geo.row_weight = malloc(sizeof(float) * dst_height);
+	geo.line_rgb = malloc(sizeof(float) * 3 * dst_width * geo.lines);
+	geo.filtered = malloc(sizeof(float) * 3 * geo.columns);
+	if (!geo.taps || !geo.frac || !geo.rows || !geo.row_weight ||
+	    !geo.line_rgb || !geo.filtered) {
+		free_geometry();
+		return false;
+	}
+
+	/* Sharp interpolation between video pixel centres: the transition
+	 * is narrowed by the horizontal sharpness. */
+	for (x = 0; x < dst_width; ++x) {
+		float fx = ((float)x + 0.5f) * geo.columns / dst_width - 0.5f;
+		float base = floorf(fx);
+		float t = ((fx - base) - 0.5f) / (1.0f - EASYMODE_SHARPNESS_H) + 0.5f;
+
+		geo.taps[x] = clampi((int)base, 0, geo.columns - 1);
+		if (geo.taps[x] >= geo.columns - 1)
+			t = 0.0f;
+		else if ((int)base < 0)
+			t = 0.0f;
+		geo.frac[x] = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+	}
+
+	/* EasyMode's scanline: 1 - ((cos(2 pi y) + 1) / 2)^beam * strength,
+	 * y in scanlines, dark between scanlines and full at their centres.
+	 * Interlaced lines leave no gaps. */
+	scans = geo.lines * repeat;
+	for (y = 0; y < dst_height; ++y) {
+		const float fy = ((float)y + 0.5f) * scans / dst_height;
+		const int scan = clampi((int)fy, 0, scans - 1);
+		const float phase = 0.5f + 0.5f * cosf(2.0f * 3.14159265f * (fy - 0.5f));
+
+		geo.rows[y] = scan / repeat;
+		geo.row_weight[y] = scans_per_line > 0
+			? 1.0f - powf(1.0f - phase, EASYMODE_BEAM_WIDTH) * EASYMODE_SCANLINE_STRENGTH
+			: 1.0f;
+	}
+
+	geo.dst_width = dst_width;
+	geo.dst_height = dst_height;
+	geo.src_width = src_width;
+	geo.src_height = src_height;
+	geo.zoom_x = zoom_x;
+	geo.zoom_y = zoom_y;
+	geo.scans_per_line = scans_per_line;
+	return true;
+}
+
+/* One video line: the small three-tap blur of the horizontal sharpness in
+ * linear light, then interpolated to every output column. */
+static void reconstruct_line(float *out, const uint32_t *line, int zoom_x)
+{
+	const float blur = 0.16f * (1.0f - EASYMODE_SHARPNESS_H);
+	float *filtered = geo.filtered;
+	int x, c, shift;
+
+	for (x = 0; x < geo.columns; ++x) {
+		const uint32_t left = line[(x > 0 ? x - 1 : 0) * zoom_x];
+		const uint32_t center = line[x * zoom_x];
+		const uint32_t right = line[(x < geo.columns - 1 ? x + 1 : x) * zoom_x];
+
+		for (c = 0, shift = 16; c < 3; ++c, shift -= 8) {
+			const float value = input_lut[(center >> shift) & 255] * (1.0f - 2.0f * blur) +
+			                    (input_lut[(left >> shift) & 255] +
+			                     input_lut[(right >> shift) & 255]) * blur;
+
+			filtered[x * 3 + c] = value;
+		}
+	}
+
+	for (x = 0; x < geo.dst_width; ++x) {
+		const float *a = filtered + geo.taps[x] * 3;
+		const float *b = a + (geo.taps[x] < geo.columns - 1 ? 3 : 0);
+		const float t = geo.frac[x];
+
+		*out++ = a[0] + (b[0] - a[0]) * t;
+		*out++ = a[1] + (b[1] - a[1]) * t;
+		*out++ = a[2] + (b[2] - a[2]) * t;
+	}
+}
+
+void CRT_EasyMode_Process(uint32_t *dst, int dst_width, int dst_height,
+	                      const uint32_t *src, int src_width, int src_height,
+	                      int src_pitch, int zoom_x, int zoom_y,
+	                      int scans_per_line)
+{
+	/* RGB aperture grille: the lit channel at full strength. */
+	const float dim = 1.0f - EASYMODE_MASK_STRENGTH;
+	const float mask[3][3] = {
+		{ 1.0f, dim, dim }, { dim, 1.0f, dim }, { dim, dim, 1.0f }
+	};
+	int x, y, line;
+
+	if (dst_width < 1 || dst_height < 1)
+		return;
+	if (zoom_x < 1)
+		zoom_x = 1;
+	if (zoom_y < 1)
+		zoom_y = 1;
+
+	init_luts();
+	if (!update_geometry(dst_width, dst_height, src_width, src_height,
+	                     zoom_x, zoom_y, scans_per_line))
+		return;
+
+	for (line = 0; line < geo.lines; ++line) {
+		const uint32_t *row = (const uint32_t *)((const unsigned char *)src +
+		                      (size_t)line * zoom_y * src_pitch);
+
+		reconstruct_line(geo.line_rgb + (size_t)line * dst_width * 3, row, zoom_x);
+	}
+
+	for (y = 0; y < dst_height; ++y) {
+		const float *rgb = geo.line_rgb + (size_t)geo.rows[y] * dst_width * 3;
+		const float weight = geo.row_weight[y];
+		uint32_t *out = dst + (size_t)y * dst_width;
+		int dot = 0;
+
+		for (x = 0; x < dst_width; ++x, rgb += 3) {
+			const float *m = mask[dot];
+			float scale = 1.0f;
+
+			if (weight < 1.0f) {
+				/* Bright pixels fill more of the gap. */
+				const float luma = rgb[0] * 0.2126f + rgb[1] * 0.7152f +
+				                   rgb[2] * 0.0722f;
+				float bright = rgb[0] > rgb[1] ? rgb[0] : rgb[1];
+
+				if (rgb[2] > bright)
+					bright = rgb[2];
+				bright = (bright + luma) * 0.5f;
+				if (bright < EASYMODE_BRIGHT_MIN)
+					bright = EASYMODE_BRIGHT_MIN;
+				else if (bright > EASYMODE_BRIGHT_MAX)
+					bright = EASYMODE_BRIGHT_MAX;
+				scale = weight + bright * (1.0f - weight);
 			}
 
-			/* EasyMode's output transfer and SC1224-friendly brightness boost. */
-			red = powf(clamp01(red), 1.0f / EASYMODE_GAMMA_OUTPUT) *
-			      EASYMODE_BRIGHT_BOOST;
-			green = powf(clamp01(green), 1.0f / EASYMODE_GAMMA_OUTPUT) *
-			        EASYMODE_BRIGHT_BOOST;
-			blue = powf(clamp01(blue), 1.0f / EASYMODE_GAMMA_OUTPUT) *
-			       EASYMODE_BRIGHT_BOOST;
-			dst[y * width + x] = rgb(red, green, blue);
+			out[x] = output(rgb[0] * scale * m[0]) << 16 |
+			         output(rgb[1] * scale * m[1]) << 8 |
+			         output(rgb[2] * scale * m[2]);
+			if (++dot == 3)
+				dot = 0;
 		}
 	}
 }

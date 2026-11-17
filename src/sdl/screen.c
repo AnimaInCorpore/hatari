@@ -69,6 +69,17 @@ static bool bUseSdlRenderer;            /* true when using SDL2 renderer */
 static bool bIsSoftwareRenderer;
 static int desktop_width, desktop_height;
 static int sdlCrtWidth, sdlCrtHeight;
+/* The shader sdlTexture and sdlCrtPixels were set up for, or -1 for none. */
+static int sdlCrtShader = -1;
+
+/* The CRT shaders model the 15 kHz RGB/TV picture only; VGA and mono
+ * monitors are shown without them. */
+static bool Screen_CrtActive(void)
+{
+	return ConfigureParams.Screen.bCrtFilter &&
+	       (ConfigureParams.Screen.nMonitorType == MONITOR_TYPE_RGB ||
+	        ConfigureParams.Screen.nMonitorType == MONITOR_TYPE_TV);
+}
 
 static CRTSHADER Screen_GetCrtShader(void)
 {
@@ -85,40 +96,50 @@ void Screen_UpdateRects(SDL_Surface *screen, int numrects, SDL_Rect *rects)
 {
 	if (bUseSdlRenderer)
 	{
-		if (ConfigureParams.Screen.bCrtFilter) {
+		/* A monitor or shader change since the texture was made. */
+		int wanted = Screen_CrtActive() ? Screen_GetCrtShader() : -1;
+		if (wanted != sdlCrtShader && sdlWindow) {
+			int win_width, win_height;
+			SDL_GetWindowSize(sdlWindow, &win_width, &win_height);
+			Screen_SetTextureScale(screen->w, screen->h, win_width, win_height, true);
+		}
+
+		if (sdlCrtShader >= 0 && sdlCrtPixels) {
 			int display_height = screen->h - Statusbar_GetHeight();
 			int row;
-			if (Screen_GetCrtShader() == CRT_SHADER_HYLLIAN) {
-				int crt_display_height = sdlCrtHeight;
-				int status_height = screen->h - display_height;
-				if (status_height > 0)
-					crt_display_height -= status_height * sdlCrtHeight / screen->h;
+			int crt_display_height = sdlCrtHeight;
+			int status_height = screen->h - display_height;
+			/* How the monitor shows a line of the current mode; the ST
+			 * and STE always draw one scanline per line. */
+			int scans = ConfigureParams.System.nMachineType == MACHINE_FALCON
+				? VIDEL_GetCrtScansPerLine() : 1;
+			if (status_height > 0)
+				crt_display_height -= status_height * sdlCrtHeight / screen->h;
+			if (sdlCrtShader == CRT_SHADER_HYLLIAN)
 				CRT_Hyllian_Process(sdlCrtPixels, sdlCrtWidth, crt_display_height,
-				                   screen->pixels, screen->w, display_height,
-				                   screen->pitch);
-				for (row = crt_display_height; row < sdlCrtHeight; ++row) {
-					int source_row = display_height +
-						(row - crt_display_height) * status_height /
-						(sdlCrtHeight - crt_display_height);
-					int column;
-					for (column = 0; column < sdlCrtWidth; ++column)
-						sdlCrtPixels[row * sdlCrtWidth + column] =
-							((const uint32_t *)((const unsigned char *)screen->pixels +
-							 source_row * screen->pitch))[column * screen->w / sdlCrtWidth];
-				}
-				SDL_UpdateTexture(sdlTexture, NULL, sdlCrtPixels,
-				                  sdlCrtWidth * (int)sizeof(uint32_t));
-			} else {
-				CRT_EasyMode_Process(sdlCrtPixels, screen->pixels, screen->w,
-				                     display_height, screen->pitch);
-				for (row = display_height; row < screen->h; ++row)
-					memcpy(sdlCrtPixels + (size_t)row * screen->w,
-					       (const unsigned char *)screen->pixels +
-					       (size_t)row * screen->pitch,
-					       (size_t)screen->w * sizeof(uint32_t));
-				SDL_UpdateTexture(sdlTexture, NULL, sdlCrtPixels,
-				                  screen->w * (int)sizeof(uint32_t));
+				                    screen->pixels, screen->w, display_height,
+				                    screen->pitch, nScreenZoomX, nScreenZoomY,
+				                    scans);
+			else
+				CRT_EasyMode_Process(sdlCrtPixels, sdlCrtWidth, crt_display_height,
+				                     screen->pixels, screen->w, display_height,
+				                     screen->pitch, nScreenZoomX, nScreenZoomY,
+				                     scans);
+			for (row = crt_display_height; row < sdlCrtHeight; ++row) {
+				int source_row = display_height +
+					(row - crt_display_height) * status_height /
+					(sdlCrtHeight - crt_display_height);
+				const uint32_t *source = (const uint32_t *)
+					((const unsigned char *)screen->pixels +
+					 (size_t)source_row * screen->pitch);
+				uint32_t *target = sdlCrtPixels + (size_t)row * sdlCrtWidth;
+				int column, step = (screen->w << 16) / sdlCrtWidth, pos = 0;
+				/* Nearest-neighbour scaling of the status bar. */
+				for (column = 0; column < sdlCrtWidth; ++column, pos += step)
+					target[column] = source[pos >> 16];
 			}
+			SDL_UpdateTexture(sdlTexture, NULL, sdlCrtPixels,
+			                  sdlCrtWidth * (int)sizeof(uint32_t));
 		} else {
 			SDL_UpdateTexture(sdlTexture, NULL, screen->pixels, screen->pitch);
 		}
@@ -171,6 +192,7 @@ static void Screen_FreeSDL2Resources(void)
 	}
 	free(sdlCrtPixels);
 	sdlCrtPixels = NULL;
+	sdlCrtShader = -1;
 	if (sdlRenderer)
 	{
 		SDL_DestroyRenderer(sdlRenderer);
@@ -371,11 +393,49 @@ void Screen_GetDesktopSize(int *width, int *height)
  * window texture needs to be re-created to apply the scaling quality
  * change.
  */
+/**
+ * Size in output pixels of the area the window texture is drawn to: the
+ * whole renderer output in a window (in real pixels on HiDPI displays), the
+ * letterboxed picture in fullscreen.
+ */
+static void Screen_CrtOutputSize(int *width, int *height)
+{
+#if ENABLE_SDL3
+	SDL_FRect rect;
+
+	if (bInFullScreen &&
+	    SDL_GetRenderLogicalPresentationRect(sdlRenderer, &rect) &&
+	    rect.w >= 1.0f && rect.h >= 1.0f) {
+		*width = (int)(rect.w + 0.5f);
+		*height = (int)(rect.h + 0.5f);
+		return;
+	}
+	SDL_GetCurrentRenderOutputSize(sdlRenderer, width, height);
+#else
+	int logical_width, logical_height;
+
+	SDL_GetRendererOutputSize(sdlRenderer, width, height);
+	SDL_RenderGetLogicalSize(sdlRenderer, &logical_width, &logical_height);
+	if (bInFullScreen && logical_width > 0 && logical_height > 0) {
+		float scale = fminf((float)*width / logical_width,
+		                    (float)*height / logical_height);
+		*width = (int)(logical_width * scale + 0.5f);
+		*height = (int)(logical_height * scale + 0.5f);
+	}
+#endif
+	if (*width < 1)
+		*width = 1;
+	if (*height < 1)
+		*height = 1;
+}
+
 void Screen_SetTextureScale(int width, int height, int win_width, int win_height, bool bForce)
 {
 	float scale_w, scale_h, scale;
 	static bool prev_nearest;
 	bool nearest;
+	int crt_shader;
+	int crt_width = 0, crt_height = 0;
 
 	if (!(bUseSdlRenderer && sdlRenderer))
 		return;
@@ -397,10 +457,22 @@ void Screen_SetTextureScale(int width, int height, int win_width, int win_height
 
 	nearest = (scale == floorf(scale));	// use nearest pixel filtering?
 
+	/* The CRT shaders draw their mask and scanlines in output pixels: the
+	 * texture covers the picture area of the window (or the letterboxed
+	 * fullscreen area) one texel per pixel, follows every size change and
+	 * is never filtered. */
+	crt_shader = Screen_CrtActive() ? Screen_GetCrtShader() : -1;
+	if (crt_shader >= 0) {
+		Screen_CrtOutputSize(&crt_width, &crt_height);
+		nearest = true;
+	}
+
 	DEBUGPRINT(("%dx%d / %dx%d -> scale = %g, nearest pixel = %d\n",
 		    win_width, win_height, width, height, scale, nearest));
 
-	if (bForce || nearest != prev_nearest)
+	if (bForce || nearest != prev_nearest || crt_shader != sdlCrtShader ||
+	    (crt_shader >= 0 &&
+	     (crt_width != sdlCrtWidth || crt_height != sdlCrtHeight)))
 	{
 #if !ENABLE_SDL3
 		char hint[2] = { nearest ? '0' : '1', 0 };
@@ -417,13 +489,10 @@ void Screen_SetTextureScale(int width, int height, int win_width, int win_height
 
 		int texture_width = width;
 		int texture_height = height;
-		if (ConfigureParams.Screen.bCrtFilter &&
-		    Screen_GetCrtShader() == CRT_SHADER_HYLLIAN) {
-			texture_width = win_width;
-			texture_height = win_height;
+		if (crt_shader >= 0) {
+			texture_width = crt_width;
+			texture_height = crt_height;
 		}
-		sdlCrtWidth = texture_width;
-		sdlCrtHeight = texture_height;
 		sdlTexture = SDL_CreateTexture(sdlRenderer, SDL_PIXELFORMAT_RGB888,
 					       SDL_TEXTUREACCESS_STREAMING,
 					       texture_width, texture_height);
@@ -432,6 +501,19 @@ void Screen_SetTextureScale(int width, int height, int win_width, int win_height
 			fprintf(stderr, "%dx%d texture\n", texture_width, texture_height);
 			Main_ErrorExit("Failed to create texture:", SDL_GetError(), -3);
 		}
+
+		/* The filter buffer always matches the texture it fills. */
+		free(sdlCrtPixels);
+		sdlCrtPixels = NULL;
+		if (crt_shader >= 0) {
+			sdlCrtPixels = calloc((size_t)texture_width * texture_height,
+			                      sizeof(uint32_t));
+			if (!sdlCrtPixels)
+				Main_ErrorExit("Could not allocate CRT filter buffer", "", -2);
+		}
+		sdlCrtWidth = texture_width;
+		sdlCrtHeight = texture_height;
+		sdlCrtShader = crt_shader;
 
 #if ENABLE_SDL3
 		if (nearest)
@@ -616,8 +698,7 @@ bool Screen_SetVideoSize(int width, int height, bool bForceChange)
 			SDL_RenderSetLogicalSize(sdlRenderer,
 						 (int)(width * pixel_aspect + 0.5f), height);
 #endif
-		else if (ConfigureParams.Screen.bCrtFilter &&
-		         Screen_GetCrtShader() == CRT_SHADER_HYLLIAN)
+		else if (Screen_CrtActive())
 			SDL_RenderSetScale(sdlRenderer, 1.0f, 1.0f);
 		else
 			SDL_RenderSetScale(sdlRenderer, scale * pixel_aspect, scale);
@@ -642,20 +723,6 @@ bool Screen_SetVideoSize(int width, int height, bool bForceChange)
 #endif
 
 		Screen_SetTextureScale(width, height, win_width, win_height, true);
-		if (ConfigureParams.Screen.bCrtFilter)
-		{
-			int crt_width = width;
-			int crt_height = height;
-			if (Screen_GetCrtShader() == CRT_SHADER_HYLLIAN) {
-				crt_width = win_width;
-				crt_height = win_height;
-			}
-			sdlCrtWidth = crt_width;
-			sdlCrtHeight = crt_height;
-			sdlCrtPixels = calloc((size_t)crt_width * crt_height, sizeof(uint32_t));
-			if (!sdlCrtPixels)
-				Main_ErrorExit("Could not allocate CRT filter buffer", "", -2);
-		}
 	}
 	else
 	{
