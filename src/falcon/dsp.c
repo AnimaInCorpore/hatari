@@ -59,6 +59,176 @@ static const char* x_ext_memory_addr_name[] = {
 };
 
 static int32_t save_cycles;
+
+/* PC-range cycle profiler. MEASUREMENT INSTRUMENT -- see hatari.md.
+ * HATARI_DSP_PCPROF="lo-hi,lo-hi,..." (hex P addresses, inclusive, up to 24
+ * ranges, which may overlap) books every executed DSP instruction's clocks to
+ * each range holding its address. HATARI_DSP_PCPROF_START=<hex pc> delays the
+ * accounting until that address first executes (skips a program's set-up).
+ * The totals are rewritten every 10 ms of DSP time to HATARI_DSP_PCPROF_OUT
+ * (default dsp_pcprof.txt), so a killed emulator still leaves them behind.
+ * HATARI_DSP_PCPROF_CALLERS="lo-hi" additionally books the clocks spent inside
+ * that one range by the return address on top of the system stack ("ret"
+ * lines) : who is waiting inside a shared polling routine.
+ * HATARI_DSP_PCPROF_CMD="pc,ret" splits the wait of the caller whose return
+ * address is ret by the value X0 holds once the instruction at pc has run
+ * ("cmd" lines, low 7 bits) : what a command loop was kept waiting for.
+ * It only observes : without the variable nothing changes, and with it the
+ * emulated timing is the same to the cycle. */
+#define DSP_PCPROF_MAX		24
+#define DSP_PCPROF_DUMP_CYCLES	320000
+static int dsp_pcprof_state = -1;		/* -1 env not read, 0 off, 1 waiting for the start pc, 2 counting */
+static int dsp_pcprof_n;
+static uint32_t dsp_pcprof_start;
+static uint32_t *dsp_pcprof_mask;		/* per P address : bit i set = inside range i */
+static struct {
+	uint32_t lo, hi;
+	uint64_t cycles, instrs;
+} dsp_pcprof[DSP_PCPROF_MAX];
+static uint64_t dsp_pcprof_cycles, dsp_pcprof_instrs, dsp_pcprof_next_dump;
+static uint32_t dsp_pcprof_call_lo = 1, dsp_pcprof_call_hi;	/* empty range = off */
+static uint64_t *dsp_pcprof_ret;		/* clocks per return address */
+static uint32_t dsp_pcprof_cmd_pc = 0x10000, dsp_pcprof_cmd_ret;
+static uint64_t dsp_pcprof_cmd_pending, dsp_pcprof_cmd_cycles[128], dsp_pcprof_cmd_count[128];
+static FILE *dsp_pcprof_file;
+
+static void DSP_PcProfInit(void)
+{
+	const char *env = getenv("HATARI_DSP_PCPROF");
+	char *end;
+	uint32_t lo, hi, pc;
+
+	dsp_pcprof_state = 0;
+	if (env == NULL || *env == '\0')
+		return;
+	dsp_pcprof_mask = calloc(0x10000, sizeof(*dsp_pcprof_mask));
+	if (dsp_pcprof_mask == NULL)
+		return;
+	while (*env != '\0' && dsp_pcprof_n < DSP_PCPROF_MAX)
+	{
+		lo = strtoul(env, &end, 16);
+		if (end == env || *end != '-')
+			break;
+		env = end + 1;
+		hi = strtoul(env, &end, 16);
+		if (end == env || lo > hi || hi > 0xffff)
+			break;
+		dsp_pcprof[dsp_pcprof_n].lo = lo;
+		dsp_pcprof[dsp_pcprof_n].hi = hi;
+		for (pc = lo; pc <= hi; pc++)
+			dsp_pcprof_mask[pc] |= 1u << dsp_pcprof_n;
+		dsp_pcprof_n++;
+		env = (*end == ',') ? end + 1 : end;
+	}
+	if (dsp_pcprof_n == 0)
+		return;
+	env = getenv("HATARI_DSP_PCPROF_OUT");
+	dsp_pcprof_file = fopen(env != NULL && *env != '\0' ? env : "dsp_pcprof.txt", "w");
+	if (dsp_pcprof_file == NULL)
+		return;
+	dsp_pcprof_state = 2;
+	if ((env = getenv("HATARI_DSP_PCPROF_CALLERS")) != NULL && *env != '\0'
+	    && (dsp_pcprof_ret = calloc(0x10000, sizeof(*dsp_pcprof_ret))) != NULL)
+	{
+		lo = strtoul(env, &end, 16);
+		hi = (*end == '-') ? strtoul(end + 1, NULL, 16) : lo;
+		if (lo <= hi && hi <= 0xffff)
+		{
+			dsp_pcprof_call_lo = lo;
+			dsp_pcprof_call_hi = hi;
+		}
+	}
+	if ((env = getenv("HATARI_DSP_PCPROF_CMD")) != NULL && *env != '\0')
+	{
+		lo = strtoul(env, &end, 16);
+		if (*end == ',')
+		{
+			dsp_pcprof_cmd_pc = lo & 0xffff;
+			dsp_pcprof_cmd_ret = strtoul(end + 1, NULL, 16) & 0xffff;
+		}
+	}
+	if ((env = getenv("HATARI_DSP_PCPROF_START")) != NULL && *env != '\0')
+	{
+		dsp_pcprof_start = strtoul(env, NULL, 16);
+		dsp_pcprof_state = 1;
+	}
+}
+
+static void DSP_PcProfDump(void)
+{
+	int i;
+
+	/* Fixed-width fields : every rewrite covers the previous one completely */
+	rewind(dsp_pcprof_file);
+	fprintf(dsp_pcprof_file, "total     %20llu %20llu\n",
+		(unsigned long long)dsp_pcprof_cycles, (unsigned long long)dsp_pcprof_instrs);
+	for (i = 0; i < dsp_pcprof_n; i++)
+		fprintf(dsp_pcprof_file, "%04x-%04x %20llu %20llu\n",
+			(unsigned)dsp_pcprof[i].lo, (unsigned)dsp_pcprof[i].hi,
+			(unsigned long long)dsp_pcprof[i].cycles,
+			(unsigned long long)dsp_pcprof[i].instrs);
+	/* Entries only ever appear, so the file never shrinks */
+	if (dsp_pcprof_ret != NULL)
+		for (i = 0; i < 0x10000; i++)
+			if (dsp_pcprof_ret[i] != 0)
+				fprintf(dsp_pcprof_file, "ret  %04x %20llu\n", (unsigned)i,
+					(unsigned long long)dsp_pcprof_ret[i]);
+	for (i = 0; i < 128; i++)
+		if (dsp_pcprof_cmd_count[i] != 0)
+			fprintf(dsp_pcprof_file, "cmd    %02x %20llu %20llu\n", (unsigned)i,
+				(unsigned long long)dsp_pcprof_cmd_cycles[i],
+				(unsigned long long)dsp_pcprof_cmd_count[i]);
+	fflush(dsp_pcprof_file);
+}
+
+static void DSP_PcProfAccount(uint32_t pc, uint32_t cycles)
+{
+	uint32_t mask;
+	int i;
+
+	if (dsp_pcprof_state < 0)
+		DSP_PcProfInit();
+	if (dsp_pcprof_state == 0)
+		return;
+	if (dsp_pcprof_state == 1)
+	{
+		if (pc != dsp_pcprof_start)
+			return;
+		dsp_pcprof_state = 2;
+	}
+	dsp_pcprof_cycles += cycles;
+	dsp_pcprof_instrs++;
+	for (mask = dsp_pcprof_mask[pc & 0xffff], i = 0; mask != 0; mask >>= 1, i++)
+	{
+		if (mask & 1)
+		{
+			dsp_pcprof[i].cycles += cycles;
+			dsp_pcprof[i].instrs++;
+		}
+	}
+	if (pc >= dsp_pcprof_call_lo && pc <= dsp_pcprof_call_hi)
+	{
+		uint32_t ret = dsp_core.registers[DSP_REG_SSH] & 0xffff;
+
+		dsp_pcprof_ret[ret] += cycles;
+		if (ret == dsp_pcprof_cmd_ret)
+		{
+			dsp_pcprof_cmd_pending += cycles;
+			if (pc == dsp_pcprof_cmd_pc)
+			{
+				i = dsp_core.registers[DSP_REG_X0] & 0x7f;
+				dsp_pcprof_cmd_cycles[i] += dsp_pcprof_cmd_pending;
+				dsp_pcprof_cmd_count[i]++;
+				dsp_pcprof_cmd_pending = 0;
+			}
+		}
+	}
+	if (dsp_pcprof_cycles >= dsp_pcprof_next_dump)
+	{
+		dsp_pcprof_next_dump = dsp_pcprof_cycles + DSP_PCPROF_DUMP_CYCLES;
+		DSP_PcProfDump();
+	}
+}
 #endif
 
 static bool bDspDebugging;
@@ -265,8 +435,12 @@ void DSP_Run(int nHostCycles)
 		// fprintf(stderr, "--> %d\n", save_cycles);
 		while (save_cycles > 0)
 		{
+			uint32_t pc = dsp_core.pc;
+
 			dsp56k_execute_instruction();
 			save_cycles -= dsp_core.instr_cycle;
+			if (unlikely(dsp_pcprof_state != 0))
+				DSP_PcProfAccount(pc, dsp_core.instr_cycle);
 		}
 	}
 
