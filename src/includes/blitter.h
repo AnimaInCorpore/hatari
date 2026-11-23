@@ -105,6 +105,9 @@ extern int  Blitter_CPU030_ParallelCycles;
 extern int  Blitter_CPU030_Active;
 extern void Blitter_CPU030_BusAccess ( void );
 extern int  Blitter_CPU030_InstrEnd ( int cycles );
+extern bool Blitter_CPU030_HoldInt ( void );
+extern int  Blitter_CPU030_CountBus;
+extern void Blitter_CPU030_BusCount ( void );
 
 
 #endif /* BLITTER_H */

@@ -7197,10 +7197,20 @@ fprintf ( stderr , "cache valid %d tag1 %x lws1 %x ctag %x data %x mem=%x\n" , c
 #endif
 
 		cont:
+#ifdef WINUAE_FOR_HATARI
+				/* the cpu is still running beside the Blitter, ahead of a
+				 * pending interrupt: take the interrupt once its credit is used */
+				if ( Blitter_CPU030_ParallelCycles && Blitter_CPU030_HoldInt()
+				    && ( r->spcflags & ~( SPCFLAG_INT | SPCFLAG_DOINT | SPCFLAG_MFP ) ) == 0 )
+					goto held;
+#endif
 				if (r->spcflags || regs.ipl[0] > 0) {
 					if (do_specialties (0))
 						exit = true;
 				}
+#ifdef WINUAE_FOR_HATARI
+			held:
+#endif
 				ipl_fetch_now();
 
 #ifdef WINUAE_FOR_HATARI
@@ -9426,6 +9436,8 @@ static void start_020_cycle(void)
 #ifdef WINUAE_FOR_HATARI
 	if ( Blitter_CPU030_ParallelCycles )
 		Blitter_CPU030_BusAccess ();
+	if ( Blitter_CPU030_CountBus )
+		Blitter_CPU030_BusCount ();
 #endif
 	regs.ce020startcycle = get_cycles();
 }
@@ -9435,6 +9447,8 @@ static void start_020_cycle_prefetch(bool opcode)
 #ifdef WINUAE_FOR_HATARI
 	if ( Blitter_CPU030_ParallelCycles )
 		Blitter_CPU030_BusAccess ();
+	if ( Blitter_CPU030_CountBus )
+		Blitter_CPU030_BusCount ();
 #endif
 	regs.ce020startcycle = get_cycles();
 	// back to back prefetch cycles require 2 extra cycles (maybe)

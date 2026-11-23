@@ -477,6 +477,12 @@ static void Blitter_FlushCycles(void)
  *
  * When blitter stops owning the bus in favor of the cpu, this seems to always take 4 cycles
  */
+/* Falcon Blitter timing, defined below Blitter_ReadWord's comment */
+static int	Blitter_Falcon_Init;
+static int	Blitter_Falcon_Acc;
+static int	Blitter_Falcon_StartCycles;
+static int	Blitter_Falcon_AccessCycles ( uint32_t addr );
+
 static void Blitter_BusArbitration ( int RequestBusMode )
 {
 	int	cycles;
@@ -484,6 +490,12 @@ static void Blitter_BusArbitration ( int RequestBusMode )
 	if ( RequestBusMode == BUS_MODE_BLITTER )	/* Bus is requested by the blitter */
 	{
 		cycles = 4;				/* Default case : take 4 cycles when going from cpu to blitter */
+		if ( Config_IsMachineFalcon() )
+		{
+			if ( Blitter_Falcon_Init < 0 )
+				Blitter_Falcon_AccessCycles ( 0 ), Blitter_Falcon_Acc = 0;	/* (reads the knobs) */
+			cycles += Blitter_Falcon_StartCycles;
+		}
 		if ( ConfigureParams.System.nMachineType == MACHINE_MEGA_STE )
 		{
 			cycles = 8;			/* MegaSTE blitter needs 4 extra cycles when requesting the bus */
@@ -522,9 +534,13 @@ static void Blitter_BusArbitration ( int RequestBusMode )
  * Blitter clock at 8 MHz ($FFFF8007 bit 2 clear) a copy costs 17.80.  The
  * Blitter ranks below video at COMBEL, so an access also waits out a Videl
  * refill.  The base values are in eighths of a cycle and spread by an
- * accumulator; HATARI_F030_BLIT=fast8,slow8 overrides them.
+ * accumulator; HATARI_F030_BLIT=fast8,slow8,cpu8,start overrides them (cpu8:
+ * the 68030 at 8 MHz, $FFFF8007 bit 0 clear, copy 18.10 per word; start: clocks a
+ * launch's bus request costs beyond the STE's 4, fitted to the probe's
+ * 1-word launches, 3).
  */
-static int	Blitter_Falcon_Eighths[2] = { 42, 67 };	/* 16 MHz, 8 MHz Blitter: fitted */
+static int	Blitter_Falcon_Eighths[3] = { 42, 67, 31 };	/* 16 MHz Blitter, 8 MHz Blitter, 8 MHz CPU bus: fitted */
+static int	Blitter_Falcon_StartCycles = 3;			/* bus request on a launch, beyond the STE's 4 */
 static int	Blitter_Falcon_Acc;
 static int	Blitter_Falcon_Init = -1;
 
@@ -536,10 +552,13 @@ static int Blitter_Falcon_AccessCycles ( uint32_t addr )
 	{
 		const char *env = getenv ( "HATARI_F030_BLIT" );
 		if ( env )
-			sscanf ( env , "%d,%d" , &Blitter_Falcon_Eighths[0] , &Blitter_Falcon_Eighths[1] );
+			sscanf ( env , "%d,%d,%d,%d" , &Blitter_Falcon_Eighths[0] , &Blitter_Falcon_Eighths[1] ,
+				 &Blitter_Falcon_Eighths[2] , &Blitter_Falcon_StartCycles );
 		Blitter_Falcon_Init = 1;
 	}
 	slow = ( IoMem_ReadByte ( 0xff8007 ) & 0x04 ) ? 0 : 1;
+	if ( ( IoMem_ReadByte ( 0xff8007 ) & 0x01 ) == 0 )
+		slow = 2;		/* CPU at 8 MHz: the bus runs at its pace (copy 18.10 per word) */
 	if ( Combel_StRam_Contended )
 		stall = Combel_StRam_Stall ( CyclesGlobalClockCounter , addr );
 	Blitter_Falcon_Acc += Blitter_Falcon_Eighths[ slow ];
@@ -1014,11 +1033,16 @@ int		Blitter_CPU030_ParallelCycles = 0;		/* cycles the cpu may still run "for fr
 int		Blitter_CPU030_Active = 0;			/* InstrEnd must be called for the current instruction */
 static int	Blitter_CPU030_BaseCycles = 0;			/* cycles of the current instruction counted before the transfer */
 static int	Blitter_CPU030_Disabled = -1;
+static uint64_t	Blitter_CPU030_StartClock = 0;			/* clock when the current pass started */
+int		Blitter_CPU030_HoldLimit = 0;			/* hold interrupts while more credit than this is left */
+int		Blitter_CPU030_CountBus = 0;			/* non-hog: counting the 68030's bus accesses */
+#define	BLITTER_F030_NONHOG_CAP			2048		/* cycles, if the cpu makes no bus access */
 
 static void	Blitter_CPU030_Reset ( void )
 {
 	Blitter_Falcon_Acc = 0;
 	Blitter_CPU030_ParallelCycles = 0;
+	Blitter_CPU030_HoldLimit = 0;
 	Blitter_CPU030_Active = 0;
 	Blitter_CPU030_BaseCycles = 0;
 }
@@ -1035,6 +1059,32 @@ static void	Blitter_CPU030_SetParallel ( int cycles )
 	Blitter_CPU030_ParallelCycles = cycles;
 	Blitter_CPU030_BaseCycles = currcycle * 2 / CYCLE_UNIT;
 	Blitter_CPU030_Active = 1;
+
+	/* An MFP interrupt that became pending part way through the pass reaches
+	 * a real 68030 at that moment: the cpu has run in parallel up to there,
+	 * and only the exception's stack writes wait for the bus.  The pass is
+	 * emulated at once, so let the cpu use the credit up to the interrupt's
+	 * time first, and hold the interrupt until then (Blitter_CPU030_HoldInt).
+	 * Without this every Timer C tick inside a long blit threw away all the
+	 * overlap: f030probe's blit.o.blit_regs hid ~0 of 34,000 cycles of
+	 * register work where a Falcon030 hides 22,000 (2026-11-23). */
+	Blitter_CPU030_HoldLimit = 0;
+	{
+		uint64_t t = UINT64_MAX;
+
+		if ( pMFP_Main->IRQ )
+			t = pMFP_Main->IRQ_Time;
+		if ( pMFP_Main->Pending_Time_Min < t )
+			t = pMFP_Main->Pending_Time_Min;
+		if ( t != UINT64_MAX )
+		{
+			int64_t before = (int64_t)( t - Blitter_CPU030_StartClock );
+			if ( t < Blitter_CPU030_StartClock || before <= 0 )
+				Blitter_CPU030_HoldLimit = cycles;	/* pending before the pass: no hold */
+			else if ( before < cycles )
+				Blitter_CPU030_HoldLimit = cycles - (int)before;
+		}
+	}
 }
 
 /**
@@ -1059,6 +1109,29 @@ void	Blitter_CPU030_BusAccess ( void )
  * Called by the cpu emulation at the end of an instruction of 'cycles' cycles
  * while Blitter_CPU030_Active != 0 : return the cycles to count
  */
+/**
+ * Falcon, non-hog: one 68030 bus access during the cpu's turn.  After 64 the
+ * Blitter takes the bus back.
+ */
+void	Blitter_CPU030_BusCount ( void )
+{
+	if ( ++BlitterState.CountBusCpu >= BLITTER_NONHOG_BUS_CPU )
+	{
+		Blitter_CPU030_CountBus = 0;
+		CycInt_RemovePendingInterrupt ( INTERRUPT_BLITTER );
+		CycInt_AddRelativeInterrupt ( 4, INT_CPU_CYCLE, INTERRUPT_BLITTER );
+	}
+}
+
+/**
+ * True while the cpu still has overlap credit to use before a pending
+ * interrupt may be taken (see Blitter_CPU030_SetParallel).
+ */
+bool	Blitter_CPU030_HoldInt ( void )
+{
+	return Blitter_CPU030_ParallelCycles > Blitter_CPU030_HoldLimit;
+}
+
 int	Blitter_CPU030_InstrEnd ( int cycles )
 {
 	if ( Blitter_CPU030_ParallelCycles )
@@ -1105,6 +1178,8 @@ Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 	Blitter_Select_LOP();
 
 	/* Setup vars */
+	Blitter_CPU030_StartClock = CyclesGlobalClockCounter;
+	Blitter_CPU030_CountBus = 0;
 	BlitterVars.pass_cycles = 0;
 	BlitterVars.op_cycles = 0;
 	BlitterState.CountBusBlitter = 0;
@@ -1161,6 +1236,17 @@ Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 			BlitterPhase |= BLITTER_PHASE_IGNORE_LAST_CPU_CYCLES;
 			Blitter_HOG_CPU_IgnoreMaxCpuCycles = BlitterVars.pass_cycles;
 			BlitterState.CountBusCpu = 0;		/* Reset CPU bus counter */
+		}
+		else if ( Config_IsMachineFalcon() && CpuRunCycleExact )
+		{
+			/* Falcon: the cpu gets the bus for 64 of its own bus accesses
+			 * (data, I/O, instruction fetches that miss the cache), counted
+			 * by Blitter_CPU030_BusCount().  A Falcon030 polling BUSY with
+			 * btst between non-hog turns: 40.2 cycles per copied word, where
+			 * a flat 256-cycle turn gave 19.6 (f030probe, 2026-11-23). */
+			BlitterState.CountBusCpu = 0;
+			Blitter_CPU030_CountBus = 1;
+			CycInt_AddRelativeInterrupt ( BLITTER_F030_NONHOG_CAP, INT_CPU_CYCLE, INTERRUPT_BLITTER );
 		}
 		else
 		{
@@ -1728,6 +1814,7 @@ void Blitter_Skew_WriteByte(void)
 void Blitter_InterruptHandler(void)
 {
 	CycInt_AcknowledgeInterrupt();
+	Blitter_CPU030_CountBus = 0;
 
 	if (BlitterRegs.ctrl & 0x80)
 	{
