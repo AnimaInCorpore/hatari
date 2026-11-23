@@ -159,17 +159,17 @@ typedef struct
 	uint32_t	dst_addr;
 	uint32_t	x_count;
 	uint32_t	y_count;
-	short	src_x_incr;
-	short	src_y_incr;
-	short	dst_x_incr;
-	short	dst_y_incr;
+	short		src_x_incr;
+	short		src_y_incr;
+	short		dst_x_incr;
+	short		dst_y_incr;
 	uint16_t	end_mask_1;
 	uint16_t	end_mask_2;
 	uint16_t	end_mask_3;
-	uint8_t	hop;
-	uint8_t	lop;
-	uint8_t	ctrl;
-	uint8_t	skew;
+	uint8_t		hop;
+	uint8_t		lop;
+	uint8_t		ctrl;
+	uint8_t		skew;
 } BLITTERREGS;
 
 /* Blitter vars */
@@ -181,25 +181,25 @@ typedef struct
 
 	uint32_t	buffer;
 	uint32_t	x_count_reset;
-	uint8_t	hog;
-	uint8_t	smudge;
-	uint8_t	halftone_line;
-	uint8_t	fxsr;
-	uint8_t	nfsr;
-	uint8_t	skew;
+	uint8_t		hog;
+	uint8_t		smudge;
+	uint8_t		halftone_line;
+	uint8_t		fxsr;
+	uint8_t		nfsr;
+	uint8_t		skew;
 } BLITTERVARS;
 
 /* Blitter state */
 typedef struct
 {
-	uint8_t	fxsr;
-	uint8_t	nfsr;
-	uint8_t	have_fxsr;
-	uint8_t	need_src;
-	uint8_t	have_src;
-	uint8_t	fetch_src;
-	uint8_t	need_dst;
-	uint8_t	have_dst;
+	uint8_t		fxsr;
+	uint8_t		nfsr;
+	uint8_t		have_fxsr;
+	uint8_t		need_src;
+	uint8_t		have_src;
+	uint8_t		fetch_src;
+	uint8_t		need_dst;
+	uint8_t		have_dst;
 
 	uint16_t	src_word;
 	uint16_t	dst_word;
@@ -207,9 +207,11 @@ typedef struct
 
 	uint16_t	end_mask;
 
-	uint16_t	CountBusBlitter;				/* To count bus accesses made by the blitter */
-	uint16_t	CountBusCpu;					/* To count bus accesses made by the CPU */
-	uint8_t	ContinueLater;					/* 0=false / 1=true */
+	uint16_t	CountBusBlitter;			/* To count bus accesses made by the blitter */
+	uint16_t	CountBusCpu;				/* To count bus accesses made by the CPU */
+	uint8_t		ContinueLater;				/* 0=false / 1=true */
+
+	uint8_t		IRQ_Line;				/* 0=IRQ set  1=IRQ cleared */
 } BLITTERSTATE;
 
 
@@ -235,7 +237,7 @@ static BLITTER_OP_FUNC	Blitter_ComputeLOP;
 #define	BLITTER_PHASE_IGNORE_LAST_CPU_CYCLES	16
 #define	BLITTER_PHASE_PAUSE			32		/* cpu owns the bus (COUNT_CPU_BUS) and stops the blitter */
 
-uint16_t		BlitterPhase = BLITTER_PHASE_STOP;		/* Internal state of the blitter */
+uint16_t	BlitterPhase = BLITTER_PHASE_STOP;		/* Internal state of the blitter */
 
 static uint16_t	Blitter_CyclesBeforeStart;			/* Number of cycles after setting busy bit before calling Blitter_Start */
 								/* (during this time, the CPU can still run and access the bus) */
@@ -261,6 +263,13 @@ static uint16_t	Blitter_HOG_CPU_IgnoreMaxCpuCycles;		/* Max number of blitter cy
 
 /* Used to compute the blitter's usage during each VBL (for statusbar) */
 static int	BlitterStatsRate;
+
+
+/*--------------------------------------------------------------*/
+/* Local functions prototypes					*/
+/*--------------------------------------------------------------*/
+
+static void	Blitter_Set_Line_IRQ_MFP ( uint8_t bit );
 
 
 
@@ -308,6 +317,68 @@ void Blitter_Reset ( void )
 	BlitterState.ContinueLater = 0 ;
 
 	Blitter_CPU030_Reset ();
+
+	/* Reset IRQ */
+	Blitter_Set_Line_IRQ_MFP ( BLITTER_IRQ_OFF );
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Set or reset the Blitter's IRQ line (as seen on MFP GPIP3)
+ * IRQ signal is inverted (0/low irq set, 1/high irq cleared)
+ *
+ * The IRQ signal is connected to GPIP3 on the MFP on ST/STE
+ * On Falcon the blitter is part of the Combel chip and there's no IRQ signal
+ */
+static void	Blitter_Set_Line_IRQ_MFP ( uint8_t bit )
+{
+	uint8_t		Line_State;
+
+	if ( Config_IsMachineFalcon() )
+		return;
+
+	LOG_TRACE ( TRACE_BLITTER, "blitter set irq line val=%d (%s) VBL=%d HBL=%d\n" , bit , bit==BLITTER_IRQ_ON ? "on" : "off" , nVBLs , nHBL );
+
+	if ( bit == BLITTER_IRQ_ON )
+		Line_State = MFP_GPIP_STATE_LOW;
+	else
+		Line_State = MFP_GPIP_STATE_HIGH;
+
+	BlitterState.IRQ_Line = Line_State;
+
+	MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_BLITTER_DSP , Line_State );
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Return the value of the Blitter's IRQ line (as seen on MFP GPIP3)
+ * IRQ signal is inverted (0/low irq set, 1/high irq cleared)
+ */
+uint8_t	Blitter_Get_Line_IRQ_MFP ( void )
+{
+	return BlitterState.IRQ_Line;
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Return true if the emulated machine has a blitter (STE, Falcon and ST with blitter),
+ * else return false
+ */
+
+bool	Blitter_IsAvailable ( void )
+{
+	if ( Config_IsMachineSTE() || Config_IsMachineFalcon()
+	  || ( Config_IsMachineST() && ConfigureParams.System.bBlitter ) )
+		return true;
+
+	else
+		return false;				/* TT or ST without blitter */
 }
 
 
@@ -999,7 +1070,7 @@ Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 	BlitterPhase = BLITTER_PHASE_RUN_TRANSFER;
 
 	/* Busy=1, set line to high/1 and clear interrupt */
-	MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_GPU_DONE , MFP_GPIP_STATE_HIGH );
+	Blitter_Set_Line_IRQ_MFP ( BLITTER_IRQ_OFF );
 
 	/* Now we enter the main blitting loop */
 	do
@@ -1023,8 +1094,7 @@ Video_GetPosition ( &FrameCycles , &HblCounterVideo , &LineCycles );
 		BlitterRegs.ctrl &= ~(0x80|0x40);
 
 		/* Busy=0, set line to low/0 and request interrupt */
-		MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_GPU_DONE , MFP_GPIP_STATE_LOW );
-
+		Blitter_Set_Line_IRQ_MFP ( BLITTER_IRQ_ON );
 		BlitterPhase = BLITTER_PHASE_STOP;
 
 		if ( BLITTER_RUN_CE )

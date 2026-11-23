@@ -585,8 +585,10 @@ void comp_fpp_opp (uae_u32 opcode, uae_u16 extra)
 				}
 				ad = comp_fp_adr (opcode);
 				if (ad < 0) {
-					m68k_setpc (m68k_getpc () - 4);
-					op_illg (opcode);
+					/* EA not compiled here (e.g. (d8,An,Xn), (d16,PC)): let
+					 * the interpreter run it. Never raise a guest exception
+					 * at compile time; the instruction may be valid. */
+					FAIL (1);
 					return;
 				}
 				switch ((extra >> 11) & 3) {
@@ -638,8 +640,8 @@ void comp_fpp_opp (uae_u32 opcode, uae_u16 extra)
 				}
 				ad = comp_fp_adr (opcode);
 				if (ad < 0) {
-					m68k_setpc (m68k_getpc () - 4);
-					op_illg (opcode);
+					/* See FMOVEM FPP->memory above. */
+					FAIL (1);
 					return;
 				}
 				switch ((extra >> 11) & 3) {
@@ -890,8 +892,7 @@ void comp_fpp_opp (uae_u32 opcode, uae_u16 extra)
 				  FAIL (1);
 				  return;
 			  case 0x38: /* FCMP */
-			    fmov_rr (FP_RESULT, dreg);
-			    fsub_rr (FP_RESULT, sreg);
+			    fcmp_result_rrr (FP_RESULT, dreg, sreg);
 			    return;
 			  case 0x3a: /* FTST */
 			    fmov_rr (FP_RESULT, sreg);

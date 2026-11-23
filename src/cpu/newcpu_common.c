@@ -940,8 +940,9 @@ void setdivuflags(uae_u32 dividend, uae_u16 divisor)
 		SET_CFLG(0);
 	} else if (currprefs.cpu_model >= 68020) {
 		SET_VFLG(1);
-		if ((uae_s32)dividend < 0)
-			SET_NFLG(1);
+		SET_CFLG(0);
+		SET_ZFLG(0);
+		SET_NFLG((uae_s32)dividend < 0);
 	} else if (currprefs.cpu_model == 68010) {
 		SET_VFLG(1);
 		if ((uae_s32)dividend < 0 && (uae_s16)divisor < 0) {
@@ -1550,9 +1551,11 @@ void Exception_build_stack_frame(uae_u32 oldpc, uae_u32 currpc, uae_u32 ssw, int
 		// version & internal information (We store index here)
 		m68k_areg(regs, 7) -= 2;
 		x_put_word(m68k_areg(regs, 7), (mmu030_idx & 0xf) | ((mmu030_idx_done & 0xf) << 4) | (regs.wb2_status << 8));
+		regs.wb2_status = 0;
 		// 3* internal registers
 		m68k_areg(regs, 7) -= 2;
 		x_put_word(m68k_areg(regs, 7), mmu030_state[2] | (regs.wb3_status << 8));
+		regs.wb3_status = 0;
 		m68k_areg(regs, 7) -= 2;
 		x_put_word(m68k_areg(regs, 7), regs.wb2_address); // = mmu030_state[1]
 		m68k_areg(regs, 7) -= 2;

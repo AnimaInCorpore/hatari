@@ -365,6 +365,68 @@ static int debug_out (const TCHAR *format, ...)
 
 #endif	/* ! WINUAE_FOR_HATARI */
 
+#ifdef WINUAE_FOR_HATARI
+/* Whether an emulated MMU is translating addresses at the moment
+ * (not before the OS enables it, e.g. from a --parse file at startup) */
+bool debug_mmu_translating(void)
+{
+	if (currprefs.mmu_model == 68030)
+		return (tc_030 & 0x80000000) != 0;	/* TC enable */
+	if (currprefs.mmu_model >= 68040)
+		return regs.mmu_enabled;
+	return false;
+}
+
+/* Translate a logical data address for Hatari's debugger, as supervisor
+ * or user data, into *phys. Returns false when the MMU can't map it.
+ * The debug variants of the translation set mmu_debugger: the table walk
+ * leaves the descriptors' used/modified bits alone and a fault is not
+ * traced. */
+bool debug_mmu_translate_data(uaecptr addr, bool super, uaecptr *phys)
+{
+	struct mmu_debug_data *mdd;
+	flagtype olds = regs.s;
+	bool ok = true;
+
+	regs.s = super;		/* FC_DATA follows it */
+	TRY(p) {
+		if (currprefs.mmu_model == 68030)
+			*phys = debug_mmu030_translate(addr, FC_DATA, false, &mdd);
+		else	/* (addr, val, super, data, write, size, mdd) */
+			*phys = debug_mmu_translate(addr, 0, super, true, false, sz_byte, &mdd);
+	} CATCH(p) {
+		ok = false;
+	} ENDTRY
+	if (currprefs.mmu_model == 68030)
+		debug_mmu030_translate_end();
+	else
+		debug_mmu_translate_end();
+	regs.s = olds;
+	return ok;
+}
+
+/* Translate a logical data address for Hatari's debugger, as supervisor
+ * or user data, into *phys. Returns false when the MMU can't map it.
+ *
+ * This combines debug_mmu_translating() to check if MMU is enabled or not,
+ * with debug_mmu_translate_data() to do the real translation.
+ *
+ * If MMU is not enabled we set "*phys" to "addr"
+ */
+bool debug_mmu_translate_to_physical(uaecptr addr, bool super, uaecptr *phys)
+{
+	/* If MMU is enabled, "addr" is a "logical" address and must be converted to "physical" */
+	if ( debug_mmu_translating() )
+		return debug_mmu_translate_data ( addr, super, phys );
+	else
+	{
+		*phys  = addr;
+		return true;
+	}
+}
+
+#endif
+
 uae_u32 get_byte_debug (uaecptr addr)
 {
 	uae_u32 v = 0xff;

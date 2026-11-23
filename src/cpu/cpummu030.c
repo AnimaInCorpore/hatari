@@ -277,22 +277,6 @@ static void mmu030_flush_atc_page_fc(uaecptr logical_addr, uae_u32 fc_base, uae_
 	mmu030_flush_cache(logical_addr);
 }
 
-/* This function flushes ATC entries depending on their logical address */
-static void mmu030_flush_atc_page(uaecptr logical_addr) {
-    int i;
-	logical_addr &= mmu030.translation.page.imask;
-    for (i=0; i<ATC030_NUM_ENTRIES; i++) {
-        if ((mmu030.atc[i].logical.addr == logical_addr) &&
-            mmu030.atc[i].logical.valid) {
-            mmu030.atc[i].logical.valid = false;
-#if MMU030_OP_DBG_MSG
-            write_log(_T("ATC: Flushing %08X\n"), mmu030.atc[i].physical.addr);
-#endif
-		}
-    }
-	mmu030_flush_cache(logical_addr);
-}
-
 /* This function flushes all ATC entries */
 void mmu030_flush_atc_all(void) {
 #if MMU030_OP_DBG_MSG
@@ -532,8 +516,9 @@ static bool mmu_op30_pload (uaecptr pc, uae_u32 opcode, uae_u16 next, uaecptr ex
     write_log (_T("PLOAD%c: Create ATC entry for %08X, FC = %i\n"), write?'W':'R', extra, fc);
 #endif
 
-    mmu030_flush_atc_page(extra);
-    mmu030_table_search(extra, fc, write, 0);
+	/* replaces only this page's entry for this function code */
+	mmu030_flush_atc_page_fc(extra, fc, 7);
+	mmu030_table_search(extra, fc, write, 0);
 	return false;
 }
 
@@ -1218,10 +1203,10 @@ static uae_u32 mmu030_table_search(uaecptr addr, uae_u32 fc, bool write, int lev
      * tables A, B, C and D and one indirect descriptor */
     uae_u32 descr[2];
     uae_u32 descr_type;
-	uaecptr descr_addr[7];
-	uaecptr descr_types[7];
+	TRY_VOLATILE uaecptr descr_addr[7];
+	TRY_VOLATILE uaecptr descr_types[7];
 	uaecptr table_addr = 0;
-    uaecptr page_addr = 0;
+    TRY_VOLATILE uaecptr page_addr = 0;
     uaecptr indirect_addr = 0;
     uae_u32 table_index = 0;
     uae_u32 limit = 0;
@@ -1229,7 +1214,7 @@ static uae_u32 mmu030_table_search(uaecptr addr, uae_u32 fc, bool write, int lev
     bool super = (fc&4) ? true : false;
     bool super_violation = false;
     bool write_protected = false;
-    uae_u8 cache_inhibit = CACHE_ENABLE_ALL;
+    TRY_VOLATILE uae_u8 cache_inhibit = CACHE_ENABLE_ALL;
     bool descr_modified = false;
         
     mmu030.status = 0; /* Reset status */
@@ -1240,7 +1225,7 @@ static uae_u32 mmu030_table_search(uaecptr addr, uae_u32 fc, bool write, int lev
     int addr_position = 1;
     int next_size = 0;
     int descr_size = 8;
-    int descr_num = 0;
+    TRY_VOLATILE int descr_num = 0;
     bool early_termination = false;
     int old_s;
     int i;
@@ -1681,7 +1666,9 @@ static void mmu030_ptest_atc_search(uaecptr logical_addr, uae_u32 fc, bool write
         return;
     }
     
-    for (i = 0; i < ATC030_NUM_ENTRIES; i++) {
+	/* the ATC holds page-aligned addresses */
+	logical_addr &= mmu030.translation.page.imask;
+	for (i = 0; i < ATC030_NUM_ENTRIES; i++) {
         if ((mmu030.atc[i].logical.fc == fc) &&
             (mmu030.atc[i].logical.addr == logical_addr) &&
             mmu030.atc[i].logical.valid) {
@@ -1800,7 +1787,26 @@ static uae_u8 mmu030fixupreg(int i)
 	return v;
 }
 
-static void mmu030fixupmod(uae_u8 data, int dir, int idx)
+#if MMU030_REG_FIXUP
+// The address register a resumed frame's side effect belongs to.  RTE runs on
+// the supervisor stack holding the frame, but the instruction being resumed
+// used the stack pointer selected by the SR the frame restores.
+static uae_u32 *mmu030fixup_rte_areg(int reg, uae_u16 sr)
+{
+	if (reg == 7) {
+		if (!(sr & 0x2000))
+			return &regs.usp;
+		if (((sr & 0x1000) != 0) != (regs.m != 0))
+			return regs.m ? &regs.isp : &regs.msp;
+	}
+	return &m68k_areg(regs, reg);
+}
+#endif
+
+// dir 0: the fault is being framed, in the mode of the faulting instruction;
+// sr is not used.
+// dir 1: the frame is being resumed by RTE, sr is the SR it restores.
+static void mmu030fixupmod(uae_u8 data, int dir, int idx, uae_u16 sr)
 {
 #if MMU030_REG_FIXUP
 	if (!data)
@@ -1810,12 +1816,15 @@ static void mmu030fixupmod(uae_u8 data, int dir, int idx)
 	if (dir)
 		adj = -adj;
 	adj <<= (data >> 3) & 3;
-	m68k_areg(regs, reg) += adj;
+	uae_u32 *areg = dir ? mmu030fixup_rte_areg(reg, sr) : &m68k_areg(regs, reg);
+	*areg += adj;
 	if (idx >= 0) {
 		struct mmufixup *m = &mmufixup[idx];
 		m->value += adj;
 	}
+#if MMU030_DEBUG
 	write_log("fixup %04x %d %d\n", mmu030_opcode & 0xffff, reg, adj);
+#endif
 #endif
 }
 
@@ -1830,27 +1839,23 @@ void mmu030_page_fault(uaecptr addr, bool read, int flags, uae_u32 fc)
 	regs.wb2_status = 0;
 	if (fc & 1) {
 		regs.mmu_ssw = MMU030_SSW_DF | (MMU030_SSW_DF << 1);
-		if (!(mmu030_state[1] & MMU030_STATEFLAG1_LASTWRITE)) {
+		// Debugger translation probes do not apply the side effects, so they
+		// must not record them either: a later frame would carry the record.
+		if (!(mmu030_state[1] & MMU030_STATEFLAG1_LASTWRITE) && !mmu_debugger) {
 			regs.wb2_status = mmu030fixupreg(0);
-			if (!mmu_debugger) {
-				mmu030fixupmod(regs.wb2_status, 0, 0);
-			}
+			mmu030fixupmod(regs.wb2_status, 0, 0, 0);
 			regs.wb3_status = mmu030fixupreg(1);
-			if (!mmu_debugger) {
-				mmu030fixupmod(regs.wb3_status, 0, 1);
-			}
+			mmu030fixupmod(regs.wb3_status, 0, 1, 0);
 		}
 	} else {
 		// only used by data fault but word sounds nice
 		flags = MMU030_SSW_SIZE_W;
 		if (currprefs.cpu_compatible) {
-			regs.wb2_status = mmu030fixupreg(0);
 			if (!mmu_debugger) {
-				mmu030fixupmod(regs.wb2_status, 0, 0);
-			}
-			regs.wb3_status = mmu030fixupreg(1);
-			if (!mmu_debugger) {
-				mmu030fixupmod(regs.wb3_status, 0, 1);
+				regs.wb2_status = mmu030fixupreg(0);
+				mmu030fixupmod(regs.wb2_status, 0, 0, 0);
+				regs.wb3_status = mmu030fixupreg(1);
+				mmu030fixupmod(regs.wb3_status, 0, 1, 0);
 			}
 			regs.mmu_ssw = MMU030_SSW_FB | MMU030_SSW_RB;
 		} else {
@@ -1865,6 +1870,11 @@ void mmu030_page_fault(uaecptr addr, bool read, int flags, uae_u32 fc)
 	// temporary store in 68040+ variables because stack frame creation may modify them.
 	regs.wb3_data = mmu030_data_buffer_out;
 	regs.wb2_address = mmu030_state[1];
+#ifdef WINUAE_FOR_HATARI
+	if (!mmu_debugger)
+		LOG_TRACE(TRACE_CPU_EXCEPTION, "mmu030 page fault addr %08x %s fc %d pc %08x ssw %04x\n",
+			addr, read ? "read" : "write", fc, regs.instruction_pc, regs.mmu_ssw);
+#endif
     bBusErrorReadWrite = read; 
 	mm030_stageb_address = addr;
 
@@ -2035,6 +2045,7 @@ static uaecptr mmu030_put_atc_generic(uaecptr addr, int l, uae_u32 fc, int flags
         return 0;
     }
 
+	mmu030_cache_state = mmu030.atc[l].physical.cache_inhibit;
 	mmu030_add_data_write_cache(addr, physical_addr, fc);
 
 	return physical_addr + page_index;
@@ -2055,6 +2066,7 @@ static uae_u32 mmu030_get_atc_generic(uaecptr addr, int l, uae_u32 fc, int flags
         return 0;
     }
 
+	mmu030_cache_state = mmu030.atc[l].physical.cache_inhibit;
 	mmu030_add_data_read_cache(addr, physical_addr, fc);
 
 	return physical_addr + page_index;
@@ -2983,11 +2995,12 @@ void m68k_do_rte_mmu030 (uaecptr a7)
 			mmu030_ad_v[i].val = get_long_mmu030(a7 + 0x5c - (i + 1) * 4);
 		}
 
-		regs.wb2_status = v >> 8;
-		regs.wb3_status = mmu030_state_2 >> 8;
+		// Consumed here: left in regs, a later frame would store it again.
+		uae_u8 wb2_status = v >> 8;
+		uae_u8 wb3_status = mmu030_state_2 >> 8;
 		mmu030_state_2 &= 0x00ff;
-		mmu030fixupmod(regs.wb2_status, 1, -1);
-		mmu030fixupmod(regs.wb3_status, 1, -1);
+		mmu030fixupmod(wb2_status, 1, -1, sr);
+		mmu030fixupmod(wb3_status, 1, -1, sr);
 
 		// did we have data fault but DF bit cleared?
 		if (ssw & (MMU030_SSW_DF << 1) && !(ssw & MMU030_SSW_DF)) {
@@ -3446,11 +3459,12 @@ void m68k_do_rte_mmu030c (uaecptr a7)
 			mmu030_ad_v[i].val = get_long_mmu030c(a7 + 0x5c - (i + 1) * 4);
 		}
 
-		regs.wb2_status = v >> 8;
-		regs.wb3_status = mmu030_state_2 >> 8;
+		// Consumed here: left in regs, a later frame would store it again.
+		uae_u8 wb2_status = v >> 8;
+		uae_u8 wb3_status = mmu030_state_2 >> 8;
 		mmu030_state_2 &= 0x00ff;
-		mmu030fixupmod(regs.wb2_status, 1, -1);
-		mmu030fixupmod(regs.wb3_status, 1, -1);
+		mmu030fixupmod(wb2_status, 1, -1, sr);
+		mmu030fixupmod(wb3_status, 1, -1, sr);
 
 		// did we have data fault but DF bit cleared?
 		if (ssw & (MMU030_SSW_DF << 1) && !(ssw & MMU030_SSW_DF)) {

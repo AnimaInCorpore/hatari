@@ -1845,7 +1845,9 @@ static void flush_cpu_caches_040_2(int cache, int scope, uaecptr addr, bool push
 					tag = addr & tagmask;
 					for (int i = 0; i < CACHELINES040; i++) {
 						if (c->valid[i] && c->tag[i] == tag) {
-							if (push) {
+							// only the data cache has lines to push; CPUSH
+							// on the instruction cache invalidates the line
+							if (push && !k) {
 								dcache040_push_line(index, i, false, pushinv);
 							} else {
 								c->valid[i] = false;
@@ -2284,12 +2286,12 @@ static void update_68k_cycles (void)
 		}
 #ifndef WINUAE_FOR_HATARI		/* [NP] TODO : handle any cpu frequency, not just mulltiplier ? */
 	} else if (currprefs.cpu_frequency) {
-		cpucycleunit = CYCLE_UNIT * baseclock / currprefs.cpu_frequency;
+		cpucycleunit = (uae_u64)CYCLE_UNIT * baseclock / ((uae_u64)8 * currprefs.cpu_frequency);
 #endif
 	} else if (currprefs.cpu_memory_cycle_exact && currprefs.cpu_clock_multiplier == 0) {
 		if (currprefs.cpu_model >= 68040) {
 			cpucycleunit = CYCLE_UNIT / 16;
-		} if (currprefs.cpu_model == 68030) {
+		} else if (currprefs.cpu_model == 68030) {
 			cpucycleunit = CYCLE_UNIT / 8;
 		} else if (currprefs.cpu_model == 68020) {
 			cpucycleunit = CYCLE_UNIT / 4;
@@ -5556,7 +5558,7 @@ static void m68k_run_1_ce (void)
 static void m68k_run_1_ce (void)
 {
 	struct regstruct *r = &regs;
-	bool first = true;
+	TRY_VOLATILE bool first = true;
 	bool exit = false;
 
 #ifdef WINUAE_FOR_HATARI
@@ -6419,7 +6421,7 @@ void cpu_halt(int id)
 /* MMU 68060  */
 static void m68k_run_mmu060 (void)
 {
-	struct flag_struct f;
+	TRY_VOLATILE struct flag_struct f;
 	int halt = 0;
 
 	check_halt();
@@ -6508,7 +6510,7 @@ static void m68k_run_mmu060 (void)
 /* Aranym MMU 68040  */
 static void m68k_run_mmu040 (void)
 {
-	struct flag_struct f;
+	TRY_VOLATILE struct flag_struct f;
 	int halt = 0;
 
 	check_halt();
@@ -6606,7 +6608,7 @@ static void m68k_run_mmu040 (void)
 // Previous MMU 68030
 static void m68k_run_mmu030 (void)
 {
-	struct flag_struct f;
+	TRY_VOLATILE struct flag_struct f;
 	int halt = 0;
 
 #ifdef WINUAE_FOR_HATARI
@@ -6831,7 +6833,7 @@ static void m68k_run_3ce (void)
 {
 	struct regstruct *r = &regs;
 	bool exit = false;
-	int extracycles = 0;
+	TRY_VOLATILE int extracycles = 0;
 
 #ifdef WINUAE_FOR_HATARI
 	Log_Printf(LOG_DEBUG, "m68k_run_3ce\n");
@@ -7025,7 +7027,7 @@ static void m68k_run_2ce (void)
 {
 	struct regstruct *r = &regs;
 	bool exit = false;
-	bool first = true;
+	TRY_VOLATILE bool first = true;
 
 #ifdef WINUAE_FOR_HATARI
 	Log_Printf(LOG_DEBUG, "m68k_run_2ce\n");
@@ -7233,7 +7235,7 @@ static void m68k_run_2p (void)
 {
 	struct regstruct *r = &regs;
 	bool exit = false;
-	bool first = true;
+	TRY_VOLATILE bool first = true;
 
 #ifdef WINUAE_FOR_HATARI
 	Log_Printf(LOG_DEBUG, "m68k_run_2p\n");

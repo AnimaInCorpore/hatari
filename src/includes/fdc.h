@@ -41,7 +41,6 @@
 #define	FDC_IRQ_SOURCE_COMPLETE			(1<<0)		/* IRQ set after completing a command */
 #define	FDC_IRQ_SOURCE_INDEX			(1<<1)		/* IRQ set when COND_IP is set and index is reached */
 #define	FDC_IRQ_SOURCE_FORCED			(1<<2)		/* IRQ was forced by a previous Dx command with COND_IMMEDIATE */
-#define	FDC_IRQ_SOURCE_HDC			(1<<3)		/* IRQ set by HDC */
 #define	FDC_IRQ_SOURCE_OTHER			(1<<4)		/* IRQ set by other parts (IPF) */
 
 
@@ -59,6 +58,13 @@
 
 #define	FDC_DC_SIGNAL_EJECTED			0
 #define	FDC_DC_SIGNAL_INSERTED			1
+
+
+#define	FDC_IRQ_ON				0	/* O/low sets IRQ line */
+#define	FDC_IRQ_OFF				1	/* 1/high clears IRQ line */
+
+#define	HDC_IRQ_ON				0	/* O/low sets IRQ line */
+#define	HDC_IRQ_OFF				1	/* 1/high clears IRQ line */
 
 
 /* FDC emulation return codes for the commands' sub-states */
@@ -81,13 +87,15 @@ extern void	FDC_SetDMAStatus ( bool bError );
 
 extern void	FDC_SetIRQ ( uint8_t IRQ_Source );
 extern void	FDC_ClearIRQ ( void );
-extern void	FDC_ClearHdcIRQ(void);
+extern uint8_t	FDC_Get_Line_IRQ_MFP ( void );
+
 extern void	FDC_InterruptHandler_Update ( void );
 
 extern void	FDC_Drive_Set_BusyLed ( uint8_t SR );
 extern int	FDC_Get_Statusbar_Text ( char *text, size_t maxlen );
 extern void	FDC_Drive_Set_Enable ( int Drive , bool value );
 extern void	FDC_Drive_Set_NumberOfHeads ( int Drive , int NbrHeads );
+extern uint8_t	FDC_Drive_Get_DC_signal ( void );
 extern void	FDC_InsertFloppy ( int Drive );
 extern void	FDC_EjectFloppy ( int Drive );
 extern void	FDC_SetDriveSide ( uint8_t io_porta_old , uint8_t io_porta_new );

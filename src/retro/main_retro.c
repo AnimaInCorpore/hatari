@@ -1,4 +1,5 @@
 
+#include <ctype.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -11,7 +12,10 @@
 #include "dialog.h"
 #include "disk_control.h"
 #include "file.h"
+#include "filename.h"
 #include "floppy.h"
+#include "harddisk.h"
+#include "log.h"
 #include "memorySnapShot.h"
 #include "m68000.h"
 #include "options.h"
@@ -21,6 +25,8 @@
 #include "tos.h"
 #include "vdi.h"
 #include "version.h"
+#include "vfs.h"
+#include "video.h"
 
 bool has_cpu_config_changed = true;
 const char *retro_save_directory;
@@ -30,6 +36,7 @@ retro_environment_t environment_cb;
 retro_video_refresh_t video_refresh_cb;
 retro_input_poll_t input_poll_cb;
 retro_input_state_t input_state_cb;
+static retro_log_printf_t log_cb = NULL;
 
 #define SAVESTATE_TMP_NAME "hatari_savestate.tmp"
 static char scratch_path[FILENAME_MAX];
@@ -62,6 +69,65 @@ static void Retro_SetInputDescriptors(void)
 	environment_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc);
 }
 
+static void Retro_LogFrontend(const char *msg, int level)
+{
+	unsigned msg_interface_version = 0;
+	environment_cb(RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION,
+				   &msg_interface_version);
+
+	if (msg_interface_version >= 1)
+	{
+		struct retro_message_ext message = {
+			msg,
+			10000,
+			3,
+			level,
+			RETRO_MESSAGE_TARGET_ALL,
+			RETRO_MESSAGE_TYPE_NOTIFICATION,
+			-1
+		};
+
+		environment_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &message);
+	}
+	else
+	{
+		struct retro_message message = {
+			msg,
+			180
+		};
+
+		environment_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+	}
+}
+
+static void Retro_Log(LOGTYPE nType, const char *psFormat, va_list args)
+{
+	char logbuf[512];
+	unsigned int len;
+	int rlevel;
+
+	if (!log_cb)
+		return;
+
+	switch (nType)
+	{
+		case LOG_DEBUG: rlevel = RETRO_LOG_DEBUG; break;
+		case LOG_WARN: rlevel = RETRO_LOG_WARN; break;
+		case LOG_ERROR: rlevel = RETRO_LOG_ERROR; break;
+		default: rlevel = RETRO_LOG_INFO;
+	}
+
+	len = vsnprintf(logbuf, sizeof(logbuf), psFormat, args);
+	if (len > 0 && len < sizeof(logbuf) - 1 && logbuf[len - 1] != '\n')
+	{
+		/* Log message might not end with \n, so add one here */
+		logbuf[len] = '\n';
+		logbuf[len + 1] = 0;
+	}
+	log_cb(rlevel, "%s", logbuf);
+}
+
+
 RETRO_API void retro_set_environment(retro_environment_t cb)
 {
 	static enum retro_pixel_format pixelformat = RETRO_PIXEL_FORMAT_XRGB8888;
@@ -78,6 +144,9 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
 
 	/* Register core options */
 	libretro_set_core_options(cb, &categories_supported);
+
+	/* Retrieve VFS interface v4 or fall back if not available */
+	VFS_Init();
 }
 
 RETRO_API void retro_set_video_refresh(retro_video_refresh_t cb)
@@ -108,6 +177,14 @@ RETRO_API void retro_init(void)
 	char *argv[4];
 	const char *save_dir = NULL;
 	const char *system_dir = NULL;
+	struct retro_log_callback logging;
+
+	/* Register log call back */
+	if (environment_cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &logging))
+	{
+		log_cb = logging.log;
+		Log_SetPrintFunction(Retro_Log);
+	}
 
 	/* Register disk control  */
 	DiskControl_Init();
@@ -124,20 +201,29 @@ RETRO_API void retro_init(void)
 		snprintf(tos_path, sizeof(tos_path), "%s%c%s",
 		         system_dir, PATHSEP, "tos.img");
 
-		argv[1] = tos_arg;
-		argv[2] = tos_path;
-		argv[3] = NULL;
-
-		Main_Init(3, argv);
-
-		return;
+		if (File_Exists(tos_path))
+		{
+			argv[1] = tos_arg;
+			argv[2] = tos_path;
+			argv[3] = NULL;
+			Main_Init(3, argv);
+		}
+		else
+		{
+			Retro_LogFrontend("System BIOS (tos.img) is missing from your system folder.",
+			                  RETRO_LOG_ERROR);
+			bUseTos = false;
+			argv[1] = NULL;
+			Main_Init(1, (char **)argv);
+		}
+	}
+	else
+	{
+		argv[1] = NULL;
+		Main_Init(1, (char **)argv);
 	}
 
-	argv[1] = NULL;
-	Main_Init(1, (char **)argv);
-
-	/* Apply core options on top of defaults/loaded config */
-	Core_ApplyBootOptions();
+	/* Apply run time options on top of defaults/loaded config */
 	Core_ApplyRuntimeOptions();
 }
 
@@ -153,7 +239,7 @@ RETRO_API void retro_get_system_info(struct retro_system_info *info)
 	info->library_name = "hatari";
 	info->library_version = HATARI_VERSION;
 	info->need_fullpath = true;
-	info->valid_extensions = "st|msa|dim|stx";
+	info->valid_extensions = "st|msa|dim|stx|ipf|m3u|ide|vhd|gem";
 }
 
 RETRO_API void retro_get_system_av_info(struct retro_system_av_info *info)
@@ -169,7 +255,7 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info *info)
 	info->geometry.max_width = MAX_VDI_WIDTH;
 	info->geometry.max_height = MAX_VDI_HEIGHT;
 	info->geometry.aspect_ratio = (float)width / (float)height;
-	info->timing.fps = 50.0f;
+	info->timing.fps = (float)nScreenRefreshRate;   /* 50 / 60 / 71 */
 
 	info->timing.sample_rate = nAudioFrequency;
 }
@@ -179,8 +265,22 @@ RETRO_API void retro_reset(void)
 	Reset_Warm();
 }
 
+static void Core_RefreshRateChanged(void)
+{
+	struct retro_system_av_info av_info;
+
+	if (!environment_cb)
+		return;
+
+	retro_get_system_av_info(&av_info);
+	environment_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av_info);
+
+	Log_Printf(LOG_INFO, "Screen refresh updated to: %dHz\n", nScreenRefreshRate);
+}
+
 RETRO_API void retro_run(void)
 {
+	static int prev_refreshrate;
 	bool options_updated = false;
 
 	if (environment_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &options_updated) &&
@@ -188,6 +288,12 @@ RETRO_API void retro_run(void)
 	{
 		/* re-apply updatable options */
 		Core_ApplyRuntimeOptions();
+	}
+
+	if (prev_refreshrate != nScreenRefreshRate)
+	{
+		Core_RefreshRateChanged();
+		prev_refreshrate = nScreenRefreshRate;
 	}
 
 	M68000_UnsetSpecial(SPCFLAG_BRK);
@@ -204,11 +310,7 @@ RETRO_API void retro_run(void)
 		m68k_run();
 	}
 
-	int width, height, pitch;
-	uint32_t *pixels;
-
-	Screen_GetDimension(&pixels, &width, &height, &pitch);
-	video_refresh_cb(pixels, width, height, pitch);
+	/* Note: video_refresh_cb is called in Screen_Draw() already! */
 }
 
 RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device)
@@ -294,18 +396,56 @@ RETRO_API void retro_cheat_set(unsigned index, bool enabled, const char *code)
 
 RETRO_API bool retro_load_game(const struct retro_game_info *game)
 {
-	if (game)
-		Floppy_SetDiskFileName(0, game->path, NULL);
+	if (game && game->path)
+	{
+		const char *path = game->path;
+
+		if (FileName_DoesExtensionMatch(path, ".m3u"))
+		{
+			DiskControl_NewGameM3U(path);
+		}
+		else if (FileName_DoesExtensionMatch(path, ".ide"))
+		{
+			Floppy_SetDiskFileNameNone(0);
+			DiskControl_NewGame(NULL);
+			HardDisk_InsertIde(path);
+		}
+		else if (FileName_DoesExtensionMatch(path, ".vhd"))
+		{
+			Floppy_SetDiskFileNameNone(0);
+			DiskControl_NewGame(NULL);
+			HardDisk_InsertAcsi(path);
+		}
+		else if (FileName_DoesExtensionMatch(path, ".gem"))
+		{
+			DiskControl_NewGame(NULL);
+			HardDisk_SetGemdosDrive(path);
+		}
+		else
+		{
+#ifndef HAVE_CAPSIMAGE
+			if (FileName_DoesExtensionMatch(path, ".ipf"))
+			{
+				Log_Printf(LOG_WARN, "IPF image '%s' requested, but this build "
+				           "was compiled without CAPSImage support.\n",
+				           path);
+			}
+#endif
+			Floppy_SetDiskFileName(0, path, NULL);
+			Floppy_InsertDiskIntoDrive(0);
+
+			/* insert disk B also */
+			if (ConfigureParams.DiskImage.szDiskFileName[1][0])
+				Floppy_InsertDiskIntoDrive(1);
+
+			DiskControl_NewGame(path);
+		}
+	}
 	else
+	{
 		Floppy_SetDiskFileNameNone(0);
-
-	Floppy_InsertDiskIntoDrive(0);
-
-	// insert disk B also
-	if (ConfigureParams.DiskImage.szDiskFileName[1][0])
-		Floppy_InsertDiskIntoDrive(1);
-
-	DiskControl_NewGame(game ? game->path : NULL);
+		DiskControl_NewGame(NULL);
+	}
 
 	Retro_SetInputDescriptors();
 
@@ -341,6 +481,11 @@ RETRO_API size_t retro_get_memory_size(unsigned id)
 	return 0;
 }
 
+
+void Main_ApplyStartupOptions(void)
+{
+	Core_ApplyBootOptions();
+}
 
 void Main_RequestQuit(int exitval)
 {
@@ -382,12 +527,14 @@ bool DlgAlert_Query(const char *text)
 
 bool DlgAlert_Notice(const char *text)
 {
-	Log_Printf(LOG_DEBUG, "DlgAlert_Notice: %s\n", text);
+	Retro_LogFrontend(text, RETRO_LOG_INFO);
 	return false;
 }
 
 void Dialog_HaltDlg(void)
 {
+	Retro_LogFrontend("Detected double bus/address error => CPU halted!",
+	                  RETRO_LOG_INFO);
 }
 
 int Dialog_MainDlg(bool *bReset, bool *bLoadedSnapshot)

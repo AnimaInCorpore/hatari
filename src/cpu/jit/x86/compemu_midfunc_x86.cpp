@@ -825,6 +825,11 @@ MIDFUNC(3,cmov_l_rr,(RW4 d, RR4 s, IMM cc))
 	int sreg=s;
 	if (d==s)
 		return;
+#if X86_TARGET_64BIT
+	Dif(sreg == PC_P && dreg != PC_P) {
+		jit_abort("Non-PC_P register %d receiving PC_P host pointer in cmov_l_rr", dreg);
+	}
+#endif
 	CLOBBER_CMOV;
 	s=readreg(s,4);
 	d=rmw(d,4,4);
@@ -1749,6 +1754,9 @@ MIDFUNC(2,mov_l_rr,(W4 d, RR4 s))
 	}
 	if (isconst(s)) {
 #if X86_TARGET_64BIT
+		Dif(s == PC_P && d != PC_P) {
+			jit_abort("Non-PC_P register %d receiving constant PC_P host pointer in mov_l_rr", d);
+		}
 		if (s == PC_P) {
 			CLOBBER_MOV;
 			d=writereg(d,4);
@@ -1761,6 +1769,9 @@ MIDFUNC(2,mov_l_rr,(W4 d, RR4 s))
 		return;
 	}
 #if X86_TARGET_64BIT
+	Dif(s == PC_P && d != PC_P) {
+		jit_abort("Non-PC_P register %d receiving PC_P host pointer in mov_l_rr", d);
+	}
 	if (d == PC_P || s == PC_P) {
 		CLOBBER_MOV;
 		s=readreg(s,4);
@@ -2950,6 +2961,18 @@ MIDFUNC(2,fsub_rr,(FRW d, FR s))
 	s=f_readreg(s);
 	d=f_rmw(d);
 	raw_fsub_rr(d,s);
+	f_unlock(s);
+	f_unlock(d);
+}
+
+MIDFUNC(3,fcmp_result_rrr,(FW r, FR d, FR s))
+{
+	clobber_flags();
+	d=f_readreg(d);
+	s=f_readreg(s);
+	r=f_writereg(r);
+	raw_fcmp_result_rrr(r,d,s);
+	f_unlock(r);
 	f_unlock(s);
 	f_unlock(d);
 }

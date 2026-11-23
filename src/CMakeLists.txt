@@ -1,7 +1,7 @@
 
 # all C-sources from this directory except for:
 # - SOURCES_HMSA: sources "hatari" shares with "hmsa"
-# - unzip.c: added separately if ZLIB_FOUND
+# - SOURCES_FILE: file access functions that are only linked into the main exe
 set(SOURCES
 	acia.c
 	avi_record.c
@@ -24,6 +24,8 @@ set(SOURCES
 	event.c
 	fdc.c
 	floppy.c
+	floppies/ipf_caps.c
+	floppies/ipf_dsk.c
 	floppies/kfs.c
 	floppies/stx.c
 	floppies/scp.c
@@ -69,14 +71,19 @@ set(SOURCES
 	xbios.c
 	ymFormat.c)
 
-if(CapsImage_FOUND)
-	set(SOURCES ${SOURCES} floppies/ipf_caps.c)
-else()
-	set(SOURCES ${SOURCES} floppies/ipf_dsk.c)
-endif()
-
 # Some code is shared with the hmsa tool, so we list this separately:
-set(SOURCES_HMSA createBlankImage.c file.c file_archive.c floppies/dim.c floppies/msa.c floppies/st.c utils.c)
+set(SOURCES_HMSA
+	createBlankImage.c
+	filename.c
+	floppies/dim.c
+	floppies/msa.c
+	floppies/st.c
+	utils.c)
+
+# File access functions for the main executable - not used on libretro:
+set(SOURCES_FILE
+	file.c
+	file_archive.c)
 
 file(GLOB TOS_IMG_FILE tos.img LIST_DIRECTORIES false)
 
@@ -115,7 +122,6 @@ include_directories(includes debug falcon cpu ${CMAKE_BINARY_DIR})
 
 if(ZLIB_FOUND)
 	include_directories(${ZLIB_INCLUDE_DIR})
-	set(SOURCES_HMSA ${SOURCES_HMSA} unzip.c)
 endif(ZLIB_FOUND)
 
 if(LibArchive_FOUND)
@@ -142,32 +148,48 @@ if(Capstone_FOUND)
 	include_directories(${CAPSTONE_INCLUDE_DIR})
 endif(Capstone_FOUND)
 
-add_library(Core OBJECT ${SOURCES})
 add_library(CoreHmsa OBJECT ${SOURCES_HMSA})
 
+add_subdirectory(debug)
+
+if(ENABLE_HATARI OR ENABLE_TOOLS)
+	add_library(CoreFile OBJECT ${SOURCES_FILE})
+endif()
+
+if(ENABLE_HATARI OR ENABLE_LIBRETRO)
+	add_subdirectory(cpu)
+	add_subdirectory(falcon)
+
+	add_library(Core OBJECT ${SOURCES})
+endif()
+
 if(ENABLE_LIBRETRO)
+	add_subdirectory(retro)
+
 	set_target_properties(Core PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
 	set_target_properties(CoreHmsa PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
-	add_subdirectory(retro)
 endif(ENABLE_LIBRETRO)
 
-add_subdirectory(cpu)
-add_subdirectory(debug)
-add_subdirectory(falcon)
-add_subdirectory(gui-sdl)
-add_subdirectory(sdl)
+if(ENABLE_HATARI)
+	add_subdirectory(gui-sdl)
+	add_subdirectory(sdl)
 
-set(APP_TARGET_OBJECTS
+	set(APP_TARGET_OBJECTS
 		$<TARGET_OBJECTS:Core>
+		$<TARGET_OBJECTS:CoreFile>
 		$<TARGET_OBJECTS:CoreHmsa>
 		$<TARGET_OBJECTS:Falcon>
 		$<TARGET_OBJECTS:UaeCpu>
 		$<TARGET_OBJECTS:GuiSdl>
 		$<TARGET_OBJECTS:Debug>
+		$<TARGET_OBJECTS:DebugUT>
 		$<TARGET_OBJECTS:Ui>)
+endif(ENABLE_HATARI)
 
-# When building for macOS, add specific sources
-if(ENABLE_OSX_BUNDLE)
+if(NOT ENABLE_HATARI)
+	# When not building the main executable, then skip the following steps
+elseif(ENABLE_OSX_BUNDLE)
+	# When building for macOS, add specific sources
 	add_executable(${APP_NAME} MACOSX_BUNDLE ${GUIOSX_RSRCS} ${GUIOSX_DOCS}
 	               ${APP_TARGET_OBJECTS} ${GUIOSX_SOURCES})
 	target_compile_definitions(${APP_NAME} PRIVATE SDL_ENABLE_OLD_NAMES)
@@ -293,12 +315,7 @@ elseif(EMSCRIPTEN)
 # Other targets, use default sources
 else()
 	add_executable(${APP_NAME} ${APP_TARGET_OBJECTS})
-endif(ENABLE_OSX_BUNDLE)
-
-if(SDL2_OTHER_CFLAGS)
-	target_compile_definitions(${APP_NAME} PRIVATE ${SDL2_OTHER_CFLAGS})
-	# message(STATUS "Additional CFLAGS of SDL: ${SDL2_OTHER_CFLAGS}")
-endif(SDL2_OTHER_CFLAGS)
+endif()
 
 if(ENABLE_LIBRETRO)
 	add_library(retro-hatari MODULE
@@ -307,94 +324,116 @@ if(ENABLE_LIBRETRO)
 			$<TARGET_OBJECTS:Falcon>
 			$<TARGET_OBJECTS:UaeCpu>
 			$<TARGET_OBJECTS:Debug>
+			$<TARGET_OBJECTS:DebugUT>
 			$<TARGET_OBJECTS:UiRetro>)
 endif(ENABLE_LIBRETRO)
 
-target_link_libraries(${APP_NAME} ${SDL2_LIBRARIES})
+if(ENABLE_HATARI)
+	if(SDL2_OTHER_CFLAGS)
+		target_compile_definitions(${APP_NAME} PRIVATE ${SDL2_OTHER_CFLAGS})
+		# message(STATUS "Additional CFLAGS of SDL: ${SDL2_OTHER_CFLAGS}")
+	endif(SDL2_OTHER_CFLAGS)
 
-if(Math_FOUND AND NOT APPLE)
-	target_link_libraries(${APP_NAME} ${MATH_LIBRARY})
-endif()
+	target_link_libraries(${APP_NAME} ${SDL2_LIBRARIES})
+
+	if(LibArchive_FOUND)
+		target_link_libraries(${APP_NAME} ${LibArchive_LIBRARIES})
+	endif(LibArchive_FOUND)
+
+	if(Math_FOUND AND NOT APPLE)
+		target_link_libraries(${APP_NAME} ${MATH_LIBRARY})
+	endif()
+
+	if(X11_FOUND)
+		target_link_libraries(${APP_NAME} ${X11_LIBRARIES})
+	endif(X11_FOUND)
+
+	if(WIN32)
+		# Needed for socket() on Windows
+		target_link_libraries(${APP_NAME} ws2_32)
+	endif(WIN32)
+endif(ENABLE_HATARI)
 
 if(Readline_FOUND)
-	target_link_libraries(${APP_NAME} ${READLINE_LIBRARY})
+	if(ENABLE_HATARI)
+		target_link_libraries(${APP_NAME} ${READLINE_LIBRARY})
+	endif(ENABLE_HATARI)
 	if(ENABLE_LIBRETRO)
 		target_link_libraries(retro-hatari ${READLINE_LIBRARY})
 	endif(ENABLE_LIBRETRO)
 endif(Readline_FOUND)
 
 if(ZLIB_FOUND)
-	target_link_libraries(${APP_NAME} ${ZLIB_LIBRARY})
+	if(ENABLE_HATARI)
+		target_link_libraries(${APP_NAME} ${ZLIB_LIBRARY})
+	endif(ENABLE_HATARI)
 	if(ENABLE_LIBRETRO)
 		target_link_libraries(retro-hatari ${ZLIB_LIBRARY})
 	endif(ENABLE_LIBRETRO)
 endif(ZLIB_FOUND)
 
-if(LibArchive_FOUND)
-	target_link_libraries(${APP_NAME} ${LibArchive_LIBRARIES})
-	if(ENABLE_LIBRETRO)
-		target_link_libraries(retro-hatari ${LibArchive_LIBRARIES})
-	endif(ENABLE_LIBRETRO)
-endif(LibArchive_FOUND)
-
 if(PNG_FOUND)
-	target_link_libraries(${APP_NAME} ${PNG_LIBRARY})
+	if(ENABLE_HATARI)
+		target_link_libraries(${APP_NAME} ${PNG_LIBRARY})
+	endif(ENABLE_HATARI)
 	if(ENABLE_LIBRETRO)
 		target_link_libraries(retro-hatari ${PNG_LIBRARY})
 	endif(ENABLE_LIBRETRO)
 endif(PNG_FOUND)
 
-if(X11_FOUND)
-	target_link_libraries(${APP_NAME} ${X11_LIBRARIES})
-endif(X11_FOUND)
-
 if(PortMidi_FOUND)
-	target_link_libraries(${APP_NAME} ${PORTMIDI_LIBRARY})
+	if(ENABLE_HATARI)
+		target_link_libraries(${APP_NAME} ${PORTMIDI_LIBRARY})
+	endif(ENABLE_HATARI)
 	if(ENABLE_LIBRETRO)
 		target_link_libraries(retro-hatari ${PORTMIDI_LIBRARY})
 	endif(ENABLE_LIBRETRO)
 endif(PortMidi_FOUND)
 
 if(CapsImage_FOUND)
-	target_link_libraries(${APP_NAME} ${CAPSIMAGE_LIBRARY})
+	if(ENABLE_HATARI)
+		target_link_libraries(${APP_NAME} ${CAPSIMAGE_LIBRARY})
+	endif(ENABLE_HATARI)
 	if(ENABLE_LIBRETRO)
 		target_link_libraries(retro-hatari ${CAPSIMAGE_LIBRARY})
 	endif(ENABLE_LIBRETRO)
 endif(CapsImage_FOUND)
 
 if(Udev_FOUND)
-	target_link_libraries(${APP_NAME} ${UDEV_LIBRARY})
+	if(ENABLE_HATARI)
+		target_link_libraries(${APP_NAME} ${UDEV_LIBRARY})
+	endif(ENABLE_HATARI)
 	if(ENABLE_LIBRETRO)
 		target_link_libraries(retro-hatari ${UDEV_LIBRARY})
 	endif(ENABLE_LIBRETRO)
 endif(Udev_FOUND)
 
 if(Capstone_FOUND)
-	target_link_libraries(${APP_NAME} ${CAPSTONE_LIBRARY})
+	if(ENABLE_HATARI)
+		target_link_libraries(${APP_NAME} ${CAPSTONE_LIBRARY})
+	endif(ENABLE_HATARI)
 	if(ENABLE_LIBRETRO)
 		target_link_libraries(retro-hatari ${CAPSTONE_LIBRARY})
 	endif(ENABLE_LIBRETRO)
 endif(Capstone_FOUND)
 
 if(APPLE)
-	target_link_libraries(${APP_NAME} "-framework Cocoa")
+	if(ENABLE_HATARI)
+		target_link_libraries(${APP_NAME} "-framework Cocoa")
+	endif(ENABLE_HATARI)
 	if(ENABLE_LIBRETRO)
 		target_link_libraries(retro-hatari "-framework Cocoa")
 	endif(ENABLE_LIBRETRO)
 endif()
 
-if(WIN32)
-	# Needed for socket() on Windows
-	target_link_libraries(${APP_NAME} ws2_32)
-endif(WIN32)
-
-
-if(ENABLE_OSX_BUNDLE)
-	install(TARGETS ${APP_NAME} BUNDLE DESTINATION /Applications)
-else()
-	install(TARGETS ${APP_NAME} RUNTIME DESTINATION ${BINDIR})
-	install(FILES hatari-icon.bmp DESTINATION ${DATADIR})
-	if(TOS_IMG_FILE)
-		install(FILES ${TOS_IMG_FILE} DESTINATION ${DATADIR})
-	endif(TOS_IMG_FILE)
-endif(ENABLE_OSX_BUNDLE)
+if(ENABLE_HATARI)
+	if(ENABLE_OSX_BUNDLE)
+		install(TARGETS ${APP_NAME} BUNDLE DESTINATION /Applications)
+	else()
+		install(TARGETS ${APP_NAME} RUNTIME DESTINATION ${BINDIR})
+		install(FILES hatari-icon.bmp DESTINATION ${DATADIR})
+		if(TOS_IMG_FILE)
+			install(FILES ${TOS_IMG_FILE} DESTINATION ${DATADIR})
+		endif(TOS_IMG_FILE)
+	endif(ENABLE_OSX_BUNDLE)
+endif(ENABLE_HATARI)

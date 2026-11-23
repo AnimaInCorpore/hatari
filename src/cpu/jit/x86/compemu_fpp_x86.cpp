@@ -116,6 +116,21 @@ static void fpuop_illg(uae_u32 opcode, uae_u32 /* extra */)
 
 uae_s32 temp_fp[4];  /* To convert between FP/integer */
 
+/* The x87 needs the explicit integer bit in normal numbers, infinities and
+   NaNs, but a zero or denormal with it set is a different, nonzero value.
+   The 68k accepts either, so set it in temp_fp if the exponent is not zero. */
+STATIC_INLINE void temp_fp_integer_bit(void)
+{
+	mov_l_rm(S2, JITPTR (temp_fp) + 8);
+	and_l_ri(S2, 0x7fff);
+	add_l_ri(S2, 0x7fff);	/* bit 15 is set if the exponent is not zero */
+	and_l_ri(S2, 0x8000);
+	shll_l_ri(S2, 16);
+	mov_l_rm(S3, JITPTR (temp_fp) + 4);
+	or_l(S3, S2);
+	mov_l_mr(JITPTR (temp_fp) + 4, S3);
+}
+
 /* return register number, or -1 for failure */
 STATIC_INLINE int get_fp_value(uae_u32 opcode, uae_u16 extra)
 {
@@ -288,12 +303,11 @@ STATIC_INLINE int get_fp_value(uae_u32 opcode, uae_u16 extra)
 		mov_w_mr((JITPTR temp_fp) + 8, S2);
 		add_l_ri(ad, 4);
 		readlong(ad, S2, S3);
-		// always set the explicit integer bit.
-		or_l_ri(S2, 0x80000000);
 		mov_l_mr(JITPTR (temp_fp) + 4, S2);
 		add_l_ri(ad, 4);
 		readlong(ad, S2, S3);
 		mov_l_mr(JITPTR (temp_fp), S2);
+		temp_fp_integer_bit();
 		delay2;
 		fmov_ext_rm(FS1, JITPTR (temp_fp));
 		break;
@@ -784,13 +798,21 @@ void comp_fbcc_opp(uae_u32 opcode)
 	v1 = get_const(PC_P);
 	v2 = get_const(S1);
 	fflags_into_flags(S2);
+	/* Conditions 1, 4 and 5 jump back to the fall-through address when the
+	 * comparison was unordered. Load that address into S2 as a constant,
+	 * built like S1 above: a runtime copy of PC_P in a temporary would be
+	 * spilled and reloaded with 32 bits and lose the upper half of the
+	 * host pointer. */
+	if (cc == 1 || cc == 4 || cc == 5) {
+		mov_l_ri(S2, 0);
+		add_l_ri(S2, (uintptr)v1);
+	}
 
 	switch (cc)
 	{
 	case 0:
 		break;							/* jump never */
 	case 1:
-		mov_l_rr(S2, PC_P);
 		cmov_l_rr(PC_P, S1, 4);
 		cmov_l_rr(PC_P, S2, 10);
 		break;
@@ -801,12 +823,10 @@ void comp_fbcc_opp(uae_u32 opcode)
 		register_branch(v1, v2, 3);
 		break;
 	case 4:
-		mov_l_rr(S2, PC_P);
 		cmov_l_rr(PC_P, S1, 2);
 		cmov_l_rr(PC_P, S2, 10);
 		break;
 	case 5:
-		mov_l_rr(S2, PC_P);
 		cmov_l_rr(PC_P, S1, 6);
 		cmov_l_rr(PC_P, S2, 10);
 		break;
@@ -1302,6 +1322,7 @@ void comp_fpp_opp(uae_u32 opcode, uae_u16 extra)
 							sub_l_ri(ad, 4);
 							readword(ad, S2, S3);
 							mov_w_mr((JITPTR temp_fp) + 8, S2);
+							temp_fp_integer_bit();
 							delay2;
 							fmov_ext_rm(reg, JITPTR (temp_fp));
 						}
@@ -1322,6 +1343,7 @@ void comp_fpp_opp(uae_u32 opcode, uae_u16 extra)
 							readlong(ad, S2, S3);
 							mov_l_mr(JITPTR(temp_fp), S2);
 							add_l_ri(ad, 4);
+							temp_fp_integer_bit();
 							delay2;
 							fmov_ext_rm(reg, JITPTR (temp_fp));
 						}
@@ -2108,8 +2130,7 @@ void comp_fpp_opp(uae_u32 opcode, uae_u16 extra)
 				FAIL(1);				/* Illegal instruction */
 				return;
 			}
-			fmov_rr(FP_RESULT, reg);
-			fsub_rr(FP_RESULT, src);	/* Right way? */
+			fcmp_result_rrr(FP_RESULT, reg, src);
 			break;
 		case 0x3a:						/* FTST */
 			if (jit_disable.ftst)

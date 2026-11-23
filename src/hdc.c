@@ -15,6 +15,7 @@ const char HDC_fileid[] = "Hatari hdc.c";
 #include "debugui.h"
 #include "endianswap.h"
 #include "file.h"
+#include "filename.h"
 #include "fdc.h"
 #include "hdc.h"
 #include "cycles.h"
@@ -57,9 +58,12 @@ const char HDC_fileid[] = "Hatari hdc.c";
 #define HDC_ReadInt32(a, i) (((unsigned) a[i] << 24) | ((unsigned) a[i + 1] << 16) | ((unsigned) a[i + 2] << 8) | a[i + 3])
 
 /* HDC globals */
-static SCSI_CTRLR AcsiBus;
-int nAcsiPartitions;
-bool bAcsiEmuOn;
+static		SCSI_CTRLR AcsiBus;
+int		nAcsiPartitions;
+bool		bAcsiEmuOn;
+
+uint8_t		IRQ_Line_HDC;				/* Connected to MFP GPIP5 */
+
 
 /* Our dummy INQUIRY response data */
 static unsigned char inquiry_bytes[] =
@@ -904,7 +908,7 @@ off_t HDC_CheckAndGetSize(const char *hdtype, const char *filename, unsigned lon
 	off_t filesize;
 	char shortname[48];
 
-	File_ShrinkName(shortname, filename, sizeof(shortname) - 1);
+	FileName_Shrink(shortname, filename, sizeof(shortname) - 1);
 
 	filesize = File_Length(filename);
 	if (filesize < 0)
@@ -1058,6 +1062,64 @@ void HDC_UnInit(void)
 
 /*---------------------------------------------------------------------*/
 /**
+ * Reset the ACSI device
+ * In return, the device should clear IRQ line connected to MFP GPIP5 (set to high)
+ * We need to clear the IRQ on reset because it's and-connected with the FDC IRQ
+ */
+void HDC_Reset ( bool bCold )
+{
+	HDC_Set_Line_IRQ_MFP ( HDC_IRQ_OFF );
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Save/Restore snapshot of local variables
+ */
+void    HDC_MemorySnapShot_Capture(bool bSave)
+{
+	MemorySnapShot_Store(&IRQ_Line_HDC, sizeof(IRQ_Line_HDC));
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Set or reset the HDC / ACSI's IRQ line
+ * IRQ signal is inverted (0/low irq set, 1/high irq cleared)
+ *
+ * The FDC and HDC IRQ signals are and-connected to GPIP5 on the MFP
+ */
+void	HDC_Set_Line_IRQ_MFP ( uint8_t bit )
+{
+	uint8_t		Line_State;
+
+	if ( bit == HDC_IRQ_ON )
+		Line_State = MFP_GPIP_STATE_LOW;
+	else
+		Line_State = MFP_GPIP_STATE_HIGH;
+
+	IRQ_Line_HDC = Line_State;
+
+	MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_FDC_HDC , Line_State );
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Return the value of the HDC / ACSI's IRQ line
+ * IRQ signal is inverted (0/low irq set, 1/high irq cleared)
+ */
+uint8_t	HDC_Get_Line_IRQ_MFP ( void )
+{
+	return IRQ_Line_HDC;
+}
+
+
+
+/*---------------------------------------------------------------------*/
+/**
  * Reset command status.
  */
 void HDC_ResetCommandStatus(void)
@@ -1199,7 +1261,7 @@ static void Acsi_DmaTransfer(void)
 	/* a minimum delay before setting Hdc's IRQ (eg "Idris OS" in ACSI mode) */
 	/* For now we simulate this with a timer and a fixed delay, but this should be measured */
 	/* on real HW (depending on the read/write operation and the size of the transfer) */
-	FDC_ClearHdcIRQ();
+	HDC_Set_Line_IRQ_MFP ( HDC_IRQ_OFF );
 	CycInt_AddRelativeInterrupt(ACSI_TRANSFER_MIN_CYCLES, INT_CPU_CYCLE, INTERRUPT_HDC_ACSI);
 
 	/* For the MegaSTE, using the HDC DMA will flush the external cache */
@@ -1210,7 +1272,7 @@ static void Acsi_DmaTransfer(void)
 static void Acsi_WriteCommandByte(int addr, uint8_t byte)
 {
 	/* Clear IRQ initially (will be set again if byte has been accepted) */
-	FDC_ClearHdcIRQ();
+	HDC_Set_Line_IRQ_MFP ( HDC_IRQ_OFF );
 
 	/* When the A1 pin is pushed to 0, we want to start a new command.
 	 * We ignore the pin for the second byte in the packet since this
@@ -1245,7 +1307,8 @@ static void Acsi_WriteCommandByte(int addr, uint8_t byte)
 	if (AcsiBus.devs[AcsiBus.target].enabled)
 	{
 		FDC_SetDMAStatus(AcsiBus.bDmaError);	/* Mark DMA error */
-		FDC_SetIRQ(FDC_IRQ_SOURCE_HDC);
+		HDC_Set_Line_IRQ_MFP ( HDC_IRQ_ON );
+
 	}
 }
 
@@ -1293,5 +1356,5 @@ void HDC_DmaTransfer(void)
 void HDC_ACSI_InterruptHandler_Update ( void )
 {
 	CycInt_AcknowledgeInterrupt();
-	FDC_SetIRQ(FDC_IRQ_SOURCE_HDC);
+	HDC_Set_Line_IRQ_MFP ( HDC_IRQ_ON );
 }

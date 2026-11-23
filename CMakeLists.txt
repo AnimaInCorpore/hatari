@@ -21,8 +21,9 @@ include(CheckFunctionExists)
 include(CheckStructHasMember)
 include(CheckSymbolExists)
 include(CheckCCompilerFlag)
-include(DistClean)
 include(CheckTypeSize)
+include(CMakeDependentOption)
+include(DistClean)
 
 # set(CMAKE_VERBOSE_MAKEFILE 1)
 
@@ -51,21 +52,15 @@ endfunction (check_large_file)
 # Conditional build features
 # ##########################
 
-set(ENABLE_DSP_EMU 1
-    CACHE BOOL "Enable DSP 56k emulator for Falcon mode")
-set(ENABLE_TRACING 1
-    CACHE BOOL "Enable tracing messages for debugging")
+option(ENABLE_HATARI "Build the main Hatari executable" ON)
+option(ENABLE_DSP_EMU "Enable DSP 56k emulator for Falcon mode" ON)
+option(ENABLE_TRACING "Enable tracing messages for debugging" ON)
+option(ENABLE_TOOLS "Build the Hatari tools" ON)
 
 find_path(LIBRETRO_INCLUDE_DIR libretro.h
           PATH_SUFFIXES libretro libretro-common)
-
-if (LIBRETRO_INCLUDE_DIR)
-	set(ENABLE_LIBRETRO 1
-	    CACHE BOOL "Build a core for libretro (experimental)")
-else()
-	set(ENABLE_LIBRETRO 0
-	    CACHE BOOL "Build a core for libretro (experimental)")
-endif(LIBRETRO_INCLUDE_DIR)
+cmake_dependent_option(ENABLE_LIBRETRO "Build a core for libretro"
+                       ON LIBRETRO_INCLUDE_DIR OFF)
 
 # Configure Hatari with AddressSanitizer:
 #   cd build; make clean; cmake -D ENABLE_ASAN:BOOL=1 -D ..
@@ -81,47 +76,33 @@ endif(LIBRETRO_INCLUDE_DIR)
 #   https://gcc.gnu.org/onlinedocs/gcc/Instrumentation-Options.html
 #
 CHECK_C_COMPILER_FLAG("-fsanitize=address" ASAN_AVAILABLE)
-if(ASAN_AVAILABLE)
-	set(ENABLE_ASAN 0
-	    CACHE BOOL "Enable GCC/LLVM run-time address debugging (~2x slowdown)")
-endif(ASAN_AVAILABLE)
+cmake_dependent_option(ENABLE_ASAN "Enable GCC/LLVM run-time address debugging (~2x slowdown)"
+                       OFF ASAN_AVAILABLE OFF)
 
 CHECK_C_COMPILER_FLAG("-fsanitize=undefined" UBSAN_AVAILABLE)
-if(UBSAN_AVAILABLE)
-	set(ENABLE_UBSAN 0
-	    CACHE BOOL "Enable GCC/LLVM run-time undefined behavior debugging")
-endif(UBSAN_AVAILABLE)
+cmake_dependent_option(ENABLE_UBSAN "Enable GCC/LLVM run-time undefined behavior debugging"
+                       OFF UBSAN_AVAILABLE OFF)
 
 CHECK_C_COMPILER_FLAG("-fstack-protector-all -fsanitize=bounds-strict" SSP_AVAILABLE)
-if(SSP_AVAILABLE)
-	set(ENABLE_SSP 0
-	    CACHE BOOL "Enable GCC/LLVM run-time stack protection")
-endif(SSP_AVAILABLE)
+cmake_dependent_option(ENABLE_SSP "Enable GCC/LLVM run-time stack protection"
+                       OFF SSP_AVAILABLE OFF)
 
 CHECK_C_COMPILER_FLAG("-fhardened" HARDENED_AVAILABLE)
-if(HARDENED_AVAILABLE)
-	set(ENABLE_HARDENED 0
-	    CACHE BOOL "Enable GCC/LLVM run-time hardening options (for production / distros not enabling them by default)")
-endif(HARDENED_AVAILABLE)
+cmake_dependent_option(ENABLE_HARDENED "Enable GCC/LLVM run-time hardening options"
+                       OFF HARDENED_AVAILABLE OFF)
 
-find_program(GZIP gzip)
-if(UNIX AND GZIP)
-	set(ENABLE_MAN_PAGES 1 CACHE BOOL "Built and install man pages")
-else()
-	set(ENABLE_MAN_PAGES 0 CACHE BOOL "Built and install man pages")
+if(UNIX)
+	find_program(GZIP gzip)
 endif()
+cmake_dependent_option(ENABLE_MAN_PAGES "Built and install man pages"
+                       ON GZIP OFF)
 
-if(APPLE)
-	set(ENABLE_OSX_BUNDLE 1
-	    CACHE BOOL "Built Hatari as macOS application bundle")
-	set(CMAKE_XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@loader_path/../Frameworks")
-else()
-	set(ENABLE_OSX_BUNDLE 0
-	    CACHE BOOL "Built Hatari as macOS application bundle")
-endif(APPLE)
+cmake_dependent_option(ENABLE_OSX_BUNDLE "Built Hatari as macOS application bundle"
+                       ON APPLE OFF)
 
 if(ENABLE_OSX_BUNDLE)
 	set(APP_NAME "Hatari")
+	set(CMAKE_XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@loader_path/../Frameworks")
 else()
 	set(APP_NAME "hatari")
 endif(ENABLE_OSX_BUNDLE)
@@ -130,7 +111,7 @@ endif(ENABLE_OSX_BUNDLE)
 # Check for libraries:
 # ####################
 
-if(NOT DEFINED ENABLE_SDL3 OR ENABLE_SDL3)
+if(ENABLE_HATARI AND NOT DEFINED ENABLE_SDL3 OR ENABLE_SDL3)
 	find_package(SDL3 QUIET)
 endif()
 if(SDL3_FOUND)
@@ -139,7 +120,7 @@ if(SDL3_FOUND)
 	set(SDL2_LIBRARIES ${SDL3_LIBRARIES})
 	set(SDL2_LIBDIR $<TARGET_FILE_DIR:SDL3::SDL3-shared>)
 	set(ENABLE_SDL3 1 CACHE BOOL "Use SDL3 instead of SDL2")
-else()
+elseif(ENABLE_HATARI)
 	find_package(SDL2)
 	if(NOT SDL2_FOUND)
 		message(FATAL_ERROR "SDL library not found!")
@@ -149,26 +130,11 @@ endif()
 
 find_package(Math)
 
-find_package(Readline)
-if(Readline_FOUND)
-	set(HAVE_LIBREADLINE 1)
-endif(Readline_FOUND)
-
 find_package(ZLIB)
 if(ZLIB_FOUND)
 	set(HAVE_LIBZ 1)
 	set(HAVE_ZLIB_H 1)
 endif(ZLIB_FOUND)
-
-find_package(LibArchive)
-if(LibArchive_FOUND)
-	set(HAVE_LIBARCHIVE 1)
-endif(LibArchive_FOUND)
-
-find_package(PNG)
-if(PNG_FOUND)
-	set(HAVE_LIBPNG 1)
-endif(PNG_FOUND)
 
 if (NOT ENABLE_OSX_BUNDLE)
 	find_package(X11)
@@ -201,6 +167,25 @@ if(Capstone_FOUND)
 		unset(Capstone_FOUND)
 	endif()
 endif(Capstone_FOUND)
+
+if(ENABLE_HATARI)
+
+	find_package(LibArchive)
+	if(LibArchive_FOUND)
+		set(HAVE_LIBARCHIVE 1)
+	endif(LibArchive_FOUND)
+
+	find_package(PNG)
+	if(PNG_FOUND)
+		set(HAVE_LIBPNG 1)
+	endif(PNG_FOUND)
+
+	find_package(Readline)
+	if(Readline_FOUND)
+		set(HAVE_LIBREADLINE 1)
+	endif(Readline_FOUND)
+
+endif(ENABLE_HATARI)
 
 # Check if Large File Support is available with the standard POSIX flags
 set (HATARI_LFS_FLAGS "-D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64")
@@ -278,6 +263,12 @@ check_symbol_exists(fseeko "stdio.h" HAVE_FSEEKO)
 check_symbol_exists(ftello "stdio.h" HAVE_FTELLO)
 check_symbol_exists(flock "sys/file.h" HAVE_FLOCK)
 check_struct_has_member("struct dirent" d_type dirent.h HAVE_DIRENT_D_TYPE)
+
+if(ENABLE_LIBRETRO)
+	check_struct_has_member("struct retro_vfs_interface" stat_64
+	                        "${LIBRETRO_INCLUDE_DIR}/libretro.h"
+	                        HAVE_RETRO_VFS_STAT_64_T)
+endif(ENABLE_LIBRETRO)
 
 # #############
 # Other CFLAGS:
@@ -430,7 +421,9 @@ configure_file(${CMAKE_SOURCE_DIR}/cmake/config-cmake.h
 
 add_subdirectory(src)
 add_subdirectory(doc)
-add_subdirectory(tools)
+if(ENABLE_TOOLS)
+	add_subdirectory(tools)
+endif(ENABLE_TOOLS)
 
 if(NOT CMAKE_CROSSCOMPILING)
 	add_subdirectory(tests)
@@ -475,7 +468,9 @@ Libraries summary :
 -------------------
 ")
 
-if(SDL3_FOUND)
+if(NOT ENABLE_HATARI)
+	message("  - sdl :\tnot building the main Hatari executable")
+elseif(SDL3_FOUND)
 	message("  - sdl :\tusing SDL3 ${SDL3_VERSION}")
 else()
 	message("  - sdl :\tusing SDL2 ${SDL2_VERSION}")

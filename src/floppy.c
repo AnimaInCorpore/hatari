@@ -29,6 +29,7 @@ const char Floppy_fileid[] = "Hatari floppy.c";
 #include "main.h"
 #include "configuration.h"
 #include "file.h"
+#include "filename.h"
 #include "fdc.h"
 #include "floppy.h"
 #include "gemdos.h"
@@ -312,7 +313,7 @@ static char* Floppy_CreateDiskBFileName(const char *pSrcFileName)
 	szExt = szName + FILENAME_MAX;
 
 	/* So, first split name into parts */
-	File_SplitPath(pSrcFileName, szDir, szName, szExt);
+	FileName_SplitPath(pSrcFileName, szDir, szName, szExt);
 
 	/* All OK? */
 	if (strlen(szName) > 0)
@@ -325,7 +326,7 @@ static char* Floppy_CreateDiskBFileName(const char *pSrcFileName)
 			/* Change 'A' to a 'B' */
 			*last += 1;
 			/* And re-build name into destination */
-			szFull = File_MakePath(szDir, szName, szExt);
+			szFull = FileName_MakePath(szDir, szName, szExt);
 			if (szFull)
 			{
 				/* Does file exist? */
@@ -372,7 +373,7 @@ const char* Floppy_SetDiskFileName(int Drive, const char *pszFileName, const cha
 	}
 	/* See if file exists, and if not, get/add correct extension */
 	if (!File_Exists(pszFileName))
-		filename = File_FindPossibleExtFileName(pszFileName, pszDiskImageNameExts);
+		filename = FileName_FindPossibleExt(pszFileName, pszDiskImageNameExts);
 	else
 		filename = strdup(pszFileName);
 	if (!filename)
@@ -417,7 +418,7 @@ const char* Floppy_SetDiskFileName(int Drive, const char *pszFileName, const cha
 	Str_Copy(ConfigureParams.DiskImage.szDiskFileName[Drive], filename,
 	         sizeof(ConfigureParams.DiskImage.szDiskFileName[Drive]));
 	free(filename);
-	//File_MakeAbsoluteName(ConfigureParams.DiskImage.szDiskFileName[Drive]);
+	//FileName_MakeAbsolute(ConfigureParams.DiskImage.szDiskFileName[Drive]);
 	return ConfigureParams.DiskImage.szDiskFileName[Drive];
 }
 
@@ -566,7 +567,7 @@ bool Floppy_InsertDiskIntoDrive(int Drive)
 
 	if ( (EmulationDrives[Drive].pBuffer == NULL) || ( ImageType == FLOPPY_IMAGE_TYPE_NONE ) )
 	{
-		Log_AlertDlg(LOG_INFO, "Image '%s' filename extension, or content unrecognized", filename);
+		Log_AlertDlg(LOG_INFO, "Image '%s' filename extension or content unrecognized", filename);
 		return false;
 	}
 
@@ -1034,16 +1035,9 @@ bool Floppy_WriteSectors(int Drive, uint8_t *pBuffer, uint16_t Sector,
  */
 bool	Floppy_ImageIsMFM ( int ImageType )
 {
-	if ( ( ImageType == FLOPPY_IMAGE_TYPE_SCP )
-	  || ( ImageType == FLOPPY_IMAGE_TYPE_KFS ) )
-		return true;
-
-#ifndef HAVE_CAPSIMAGE
-	if (ImageType == FLOPPY_IMAGE_TYPE_IPF)
-		return true;
-#endif
-
-	return false;
+	return ImageType == FLOPPY_IMAGE_TYPE_SCP
+		|| ImageType == FLOPPY_IMAGE_TYPE_KFS
+		|| (ImageType == FLOPPY_IMAGE_TYPE_IPF && !bUseCapsLib);
 }
 
 /*

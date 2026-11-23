@@ -115,12 +115,12 @@ ACSI DMA and Floppy Disk Controller(FDC)
   0xff8606 - DMA Status(read), DMA Mode Control(write) - NOTE bits 0,9-15 are not used
     Bit 1 - FDC Pin A0 (See below)
     Bit 2 - FDC Pin A1
-    Bit 3 - FDC/HDC Register Select
+    Bit 3 - FDC/HDC Register Select	0=FDC  1=HDC/ACSI
     Bit 4 - FDC/Sector count select
     Bit 5 - Reserved
     Bit 6 - Enable/Disable DMA
-    Bit 7 - HDC/FDC
-    Bit 8 - Read/Write
+    Bit 7 - DMA HDC/FDC			0=DMA with HDC/ACSI-bus  1=DMA with FDC
+    Bit 8 - Read/Write			0=Read   1=Write
 
     A1  A0    Read        Write(bit 8==1)
     0  0    Status        Command
@@ -641,6 +641,8 @@ typedef struct {
 	int		DriveSelSignal;				/* 0 or 1 for drive A or B ; or -1 if no drive selected */
 	uint8_t		IRQ_Signal;				/* 0 if IRQ is not set, else value depends on the source of the IRQ */
 
+	uint8_t		IRQ_Line_FDC;				/* Connected to MFP GPIP5 */
+
 	uint16_t	DensityMode;				/* bits 0 and 1 of $ff860e */
 								/* 0x00 : FDC operates in DD mode */
 								/* 0x03 : FDC operates in HD mode */
@@ -702,6 +704,9 @@ typedef struct {
 	uint64_t	CommandComplete_ClockCounter;		/* Value of CyclesGlobalClockCounter when a command complete */
 
 	int		EmulationMode;				/* FDC_EMULATION_MODE_INTERNAL or FDC_EMULATION_MODE_IPF */
+
+	uint8_t		Drive_DC_Line;				/* Disk Change signal on GPIP4 on TT MFP */
+
 } FDC_STRUCT;
 
 
@@ -961,7 +966,7 @@ int	FDC_Get_Statusbar_Text ( char *text, size_t maxlen )
 	}
 	else							/* FDC_EMULATION_MODE_IPF */
 	{
-		IPF_FDC_StatusBar ( &Command , &Head , &Track , &Sector , &Side );
+		IPF_Caps_FDC_StatusBar(&Command, &Head, &Track, &Sector, &Side);
 	}
 
 	if      ( ( Command & 0xf0 ) == 0x00 )	strcpy ( CommandText , "RE" );		/* Restore */
@@ -1236,7 +1241,7 @@ void FDC_Reset ( bool bCold )
 	FDC.PLL_Type = FDC_PLL_TYPE_DIGITAL;
 
 	/* Also reset IPF emulation */
-	IPF_Reset( bCold );
+	IPF_Caps_Reset(bCold);
 }
 
 
@@ -1568,6 +1573,9 @@ static int FDC_GetEmulationMode ( void )
 		else
 			Mode = FDC_EMULATION_MODE_INTERNAL;
 	}
+
+	if (!bUseCapsLib)
+		Mode = FDC_EMULATION_MODE_INTERNAL;
 #else
 	Mode = FDC_EMULATION_MODE_INTERNAL;
 #endif
@@ -1606,7 +1614,7 @@ void	FDC_Drive_Set_Enable ( int Drive , bool value )
 		FDC_DRIVES[ Drive ].Enabled = value;
 
 	/* Also forward change to IPF emulation */
-	IPF_Drive_Set_Enable ( Drive , value );
+	IPF_Caps_Drive_SetEnable(Drive, value);
 }
 
 
@@ -1623,7 +1631,7 @@ void	FDC_Drive_Set_NumberOfHeads ( int Drive , int NbrHeads )
 		FDC_DRIVES[ Drive ].NumberOfHeads = NbrHeads;
 
 	/* Also forward change to IPF emulation */
-	IPF_Drive_Set_DoubleSided ( Drive , NbrHeads==2 ? true : false );
+	IPF_Caps_Drive_SetDoubleSided(Drive, NbrHeads == 2 ? true : false);
 }
 
 
@@ -1637,7 +1645,7 @@ void	FDC_Drive_Set_NumberOfHeads ( int Drive , int NbrHeads )
  *  0 = drive is selected and a disk was ejected (ie drive is empty)
  *  1 = drive is not selected or a disk was inserted and a step pulse received
  *
- * DC signal was only available on the TT machines and in that case it's connected
+ * DC signal is only available on the TT machines and in that case it's connected
  * to the TT MFP on GPIP4 (the signal is inverted before going to GPIP4)
  */
 static void	FDC_Drive_Connect_DC_signal_GPIP ( int Drive )
@@ -1655,8 +1663,21 @@ static void	FDC_Drive_Connect_DC_signal_GPIP ( int Drive )
 	else
 		state = MFP_GPIP_STATE_HIGH;
 
+	FDC.Drive_DC_Line = state;
+
 	MFP_GPIP_Set_Line_Input ( pMFP_TT , MFP_TT_GPIP_LINE_DC , state );
 }
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Return the value of the Disk Change (DC) signal on TT
+ */
+uint8_t	FDC_Drive_Get_DC_signal ( void )
+{
+	return FDC.Drive_DC_Line;
+}
+
 
 
 /*-----------------------------------------------------------------------*/
@@ -1784,7 +1805,7 @@ void	FDC_SetDriveSide ( uint8_t io_porta_old , uint8_t io_porta_new )
 		FDC_UpdateFloppyDensity ( Drive , FDC_DRIVES[ Drive ].HeadTrack , FDC.SideSignal );
 
 	/* Also forward change to IPF emulation */
-	IPF_SetDriveSide ( io_porta_old , io_porta_new );
+	IPF_Caps_SetDriveSide(io_porta_old, io_porta_new);
 }
 
 
@@ -1871,10 +1892,8 @@ int	FDC_GetBytesPerTrack ( uint8_t Drive , uint8_t Track , uint8_t Side )
 			return FDC_GetBytesPerTrack_SCP ( Drive , Track , Side );
 		else if ( EmulationDrives[Drive].ImageType == FLOPPY_IMAGE_TYPE_KFS )
 			return FDC_GetBytesPerTrack_KFS ( Drive , Track , Side );
-#ifndef HAVE_CAPSIMAGE
 		else if ( EmulationDrives[Drive].ImageType == FLOPPY_IMAGE_TYPE_IPF )
 			return FDC_GetBytesPerTrack_IPF ( Drive , Track , Side );
-#endif
 
 		SectorsPerTrack = FDC_GetSectorsPerTrack ( Drive , FDC_DRIVES[ Drive ].HeadTrack , FDC.SideSignal );
 		if ( SectorsPerTrack >= 36 )
@@ -2008,10 +2027,8 @@ static uint32_t	FDC_GetCyclesPerRev_FdcCycles ( int Drive )
 		return FDC_GetCyclesPerRev_FdcCycles_SCP ( Drive , FDC_DRIVES[ Drive ].HeadTrack , FDC.SideSignal );
 	else if ( EmulationDrives[Drive].ImageType == FLOPPY_IMAGE_TYPE_KFS )
 		return FDC_GetCyclesPerRev_FdcCycles_KFS ( Drive , FDC_DRIVES[ Drive ].HeadTrack , FDC.SideSignal );
-#ifndef HAVE_CAPSIMAGE
 	else if ( EmulationDrives[Drive].ImageType == FLOPPY_IMAGE_TYPE_IPF )
 		return FDC_GetCyclesPerRev_FdcCycles_IPF ( Drive , FDC_DRIVES[ Drive ].HeadTrack , FDC.SideSignal );
-#endif
 
 	/* Assume a standard length for all tracks for ST/MSA images */
 	FdcCyclesPerRev = (uint64_t)(MachineClocks.FDC_Freq * 1000.L) / ( FDC_DRIVES[ Drive ].RPM / 60 );
@@ -2262,22 +2279,20 @@ void FDC_SetIRQ ( uint8_t IRQ_Source )
 
 	else
 	{
-		/* Acknowledge in MFP circuit, pass bit, enable, pending */
+		/* Set line to low/0 to request interrupt */
+		FDC.IRQ_Line_FDC = MFP_GPIP_STATE_LOW;
 		MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_FDC_HDC , MFP_GPIP_STATE_LOW );
 		LOG_TRACE(TRACE_FDC, "fdc set irq 0x%x source 0x%x VBL=%d HBL=%d\n" , FDC.IRQ_Signal , IRQ_Source , nVBLs , nHBL );
 	}
 
-	/* If IRQ comes from HDC or other sources (IPF), we don't need */
+	/* If IRQ comes from other sources (IPF), we don't need */
 	/* to handle the forced IRQ case used in FDC */
-	if ( IRQ_Source == FDC_IRQ_SOURCE_HDC )
-		FDC.IRQ_Signal = FDC_IRQ_SOURCE_HDC;
-
-	else if ( IRQ_Source == FDC_IRQ_SOURCE_OTHER )
+	if ( IRQ_Source == FDC_IRQ_SOURCE_OTHER )
 		FDC.IRQ_Signal = FDC_IRQ_SOURCE_OTHER;
 
 	else								/* IRQ comes from FDC */
 	{
-		FDC.IRQ_Signal &= ~( FDC_IRQ_SOURCE_HDC | FDC_IRQ_SOURCE_OTHER );
+		FDC.IRQ_Signal &= ~FDC_IRQ_SOURCE_OTHER;
 		FDC.IRQ_Signal |= IRQ_Source;
 	}
 }
@@ -2285,7 +2300,7 @@ void FDC_SetIRQ ( uint8_t IRQ_Source )
 
 /*-----------------------------------------------------------------------*/
 /**
- * Reset the IRQ signal ; in case the source of the interrupt is also
+ * Reset the FDC's IRQ signal ; in case the source of the interrupt is also
  * a "force interrupt immediate" command, the IRQ signal should not be cleared
  * (only command 0xD0 or any new command followed by a read of status reg
  * can clear the forced IRQ)
@@ -2299,6 +2314,7 @@ void FDC_ClearIRQ ( void )
 	if ( ( FDC.IRQ_Signal & FDC_IRQ_SOURCE_FORCED ) == 0 )
 	{
 		FDC.IRQ_Signal = 0;
+		FDC.IRQ_Line_FDC = MFP_GPIP_STATE_HIGH;
 		MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_FDC_HDC , MFP_GPIP_STATE_HIGH );
 		LOG_TRACE(TRACE_FDC, "fdc clear irq VBL=%d HBL=%d\n" , nVBLs , nHBL );
 	}
@@ -2310,14 +2326,20 @@ void FDC_ClearIRQ ( void )
 	}
 }
 
-void FDC_ClearHdcIRQ(void)
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Return the value of the FDC's IRQ line
+ * IRQ signal is inverted (0/low irq set, 1/high irq cleared)
+ */
+uint8_t	FDC_Get_Line_IRQ_MFP ( void )
 {
-	FDC.IRQ_Signal &= ~FDC_IRQ_SOURCE_HDC;
-	if (FDC.IRQ_Signal == 0)
-	{
-		MFP_GPIP_Set_Line_Input ( pMFP_Main , MFP_GPIP_LINE_FDC_HDC , MFP_GPIP_STATE_HIGH );
-	}
+	return FDC.IRQ_Line_FDC;
 }
+
+
 
 
 /*-----------------------------------------------------------------------*/
@@ -4798,7 +4820,7 @@ void FDC_DiskController_WriteWord ( void )
 		}
 		else if ( EmulationMode == FDC_EMULATION_MODE_IPF )
 		{
-			IPF_FDC_WriteReg ( FDC_reg , IoMem_ReadByte(0xff8605) );
+			IPF_Caps_FDC_WriteReg(FDC_reg, IoMem_ReadByte(0xff8605));
 		}
 	}
 }
@@ -4932,7 +4954,7 @@ void FDC_DiskControllerStatus_ReadWord ( void )
 		}
 		else if ( EmulationMode == FDC_EMULATION_MODE_IPF )
 		{
-			DiskControllerByte = IPF_FDC_ReadReg ( FDC_reg );
+			DiskControllerByte = IPF_Caps_FDC_ReadReg(FDC_reg);
 			if ( ( FDC_reg == 0x0 ) && ( FDC.DriveSelSignal >= 0 ) )	/* 0 0 - Status register */
 			{
 				/* Temporarily change the WPRT bit if we're in a transition phase */

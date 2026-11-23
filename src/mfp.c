@@ -150,6 +150,7 @@ const char MFP_fileid[] = "Hatari mfp.c";
 #include "dmaSnd.h"
 #include "crossbar.h"
 #include "fdc.h"
+#include "hdc.h"
 #include "ikbd.h"
 #include "hatari-glue.h"
 #include "cycInt.h"
@@ -171,10 +172,12 @@ const char MFP_fileid[] = "Hatari mfp.c";
 #include "acia.h"
 #include "utils.h"
 #include "scc.h"
+#include "blitter.h"
+#include "falcon/nvram.h"
 
 
 /*
-  MC68901 MultiFuncion Peripheral (MFP)
+  MC68901 MultiFunction Peripheral (MFP)
 
   References :
    - MC68901 datasheet by Motorola
@@ -321,33 +324,35 @@ Input -----/             |         ------------------------              |      
     In that case, the TT's specific MFP (accessible between $FFFA81 and $FFFAAF) has the highest priority
     and the "normal" MFP (accessible between $FFFA01 and $FFFA2F) has the lowest priority
 
-  - Each MFP has 8 GPIP bits used to connect signals from external devices/ports :
+  - Each MFP has 8 GPIP bits used to connect signals from external devices/ports.
+    GPIP bits can set as input (I) or output (O) using the DDR register
+    The (I) or (O) after each bit describes the typical usage in Atari machines
 
     Main MFP :
-      0 : parallel port, busy signal (0=not busy, 1=busy)
-      1 : rs232 port, data carrier detect (DCD) signal
-      2 : rs232 port, clear to send (CTS) signal
-      3 : STF/STE/TT : blitter, active low (0=IRQ set, 1=IRQ not set)
-          Falcon : DSP, active low (0=HREQ set, 1=HREQ not set)
-      4 : ACIAs 6850 (ikbd and midi), active low (0=IRQ set for ACIA 1 and/or 2, 1=IRQ not set for neither ACIA 1 nor 2)
-      5 : FDC/HD, active low (0=IRQ set, 1=IRQ not set)
-          STF/STE/megaSTE/TT : FDC/ACSI (0=IRQ set for FDC and/or ACSI, 1=IRQ not set for FDC nor ACSI)
-          Falcon : FDC/IDE/SCSI (0=IRQ set for FDC and/or IDE and/or SCSI, 1=IRQ not set for FDC nor IDE nor SCSI)
-      6 : rs232 port, ring indicator (RI) signal
-      7 : monochrome monitor detect (0=monochrome, 1=color) and/or dma sound (0=idle, 1=play)
-          STF : monochrome monitor detect (0=monochrome, 1=color)
-          STE/TT : monochrome monitor detect XOR dma sound play
-          Falcon : dma sound play/record (0=idle, 1=play/record)
+      0 (I)   : parallel port, busy signal (0=not busy, 1=busy)
+      1 (I)   : rs232 port, data carrier detect (DCD) signal
+      2 (I)   : rs232 port, clear to send (CTS) signal
+      3 (I)   : STF/STE : blitter, active low (0=IRQ set, 1=IRQ not set)
+                Falcon : DSP, active low (0=HREQ set, 1=HREQ not set)
+      4 (I)   : ACIAs 6850 (ikbd and midi), active low (0=IRQ set for ACIA 1 and/or 2, 1=IRQ not set for neither ACIA 1 nor 2)
+      5 (I)   : FDC/HD, active low (0=IRQ set, 1=IRQ not set)
+                STF/STE/megaSTE/TT : FDC/ACSI (0=IRQ set for FDC and/or ACSI, 1=IRQ not set for FDC nor ACSI)
+                Falcon : FDC/IDE/SCSI (0=IRQ set for FDC and/or IDE and/or SCSI, 1=IRQ not set for FDC nor IDE nor SCSI)
+      6 (I)   : rs232 port, ring indicator (RI) signal
+      7 (I)   : monochrome monitor detect (0=monochrome, 1=color) and/or dma sound (0=idle, 1=play)
+                STF : monochrome monitor detect (0=monochrome, 1=color)
+                STE/TT : monochrome monitor detect XOR dma sound play
+                Falcon : dma sound play/record (0=idle, 1=play/record)
 
     TT MFP :
-      0 : connected to external I/O pin
-      1 : connected to external I/O pin
-      2 : SCC DMA controller, active low (0=IRQ set, 1=IRQ not set)
-      3 : SCC serial port B, ring indicator (RI) signal
-      4 : Internal floppy drive pin 34, NOT disk change (DC) signal (0=inserted 1=ejected)
-      5 : SCSI DMA controller, active low (0=IRQ set, 1=IRQ not set)
-      6 : RTC MC146818A, active low (0=IRQ set, 1=IRQ not set)
-      7 : SCSI NCR5380, active *high* (1=IRQ set, 0=IRQ not set)
+      0 (I/O) : connected to external I/O pin
+      1 (I/O) : connected to external I/O pin
+      2 (I)   : DMA controller, active low (0=IRQ set, 1=IRQ not set) (XDMAIRQ)
+      3 (I)   : SCC serial port B, ring indicator (RI) signal (XBRIRQ)
+      4 (I)   : Internal floppy drive pin 34, NOT disk change (DC) signal (0=inserted 1=ejected) (DCH)
+      5 (I)   : SCSI DMA controller, active low (0=IRQ set, 1=IRQ not set) (XSDMAIRQ)
+      6 (I)   : RTC MC146818A, active low (0=IRQ set, 1=IRQ not set) (XRTCIRQ)
+      7 (I)   : SCSI NCR5380, active *high* (1=IRQ set, 0=IRQ not set) (SCSIRQ)
 
 */
 
@@ -417,8 +422,12 @@ static int	MFP_CheckPendingInterrupts ( MFP_STRUCT *pMFP );
 static void	MFP_GPIP_Update_Interrupt ( MFP_STRUCT *pMFP , uint8_t GPIP_old , uint8_t GPIP_new , uint8_t AER_old , uint8_t AER_new , uint8_t DDR_old , uint8_t DDR_new );
 
 static uint8_t	MFP_Main_Compute_GPIP7 ( void );
-static uint8_t	MFP_Main_Compute_GPIP_LINE_ACIA ( void );
+static uint8_t	MFP_Main_Compute_GPIP5_FDC_HDC ( void );
+static uint8_t	MFP_Main_Compute_GPIP4_LINE_ACIA ( void );
+static uint8_t	MFP_Main_Compute_GPIP3_Blitter_DSP ( void );
+static void	MFP_GPIP_Update_Main ( MFP_STRUCT *pMFP );
 static void	MFP_GPIP_ReadByte_Main ( MFP_STRUCT *pMFP );
+static void	MFP_GPIP_Update_TT ( MFP_STRUCT *pMFP );
 static void	MFP_GPIP_ReadByte_TT ( MFP_STRUCT *pMFP );
 
 
@@ -520,9 +529,7 @@ static void	MFP_Reset ( MFP_STRUCT *pMFP )
 {
 	int	i;
 
-	pMFP->GPIP = 0;
 	pMFP->AER = 0;
-	pMFP->DDR = 0;
 	pMFP->IERA = 0;
 	pMFP->IERB = 0;
 	pMFP->IPRA = 0;
@@ -558,7 +565,19 @@ static void	MFP_Reset ( MFP_STRUCT *pMFP )
 	pMFP->TAI = 0;
 	pMFP->TBI = 0;
 
-	/* Clear IRQ */
+	/* On reset, DDR is set to 0 which means all GPIP bits are set to 'input'
+	 * So we must re-evaluate the value of each 8 GPIP bits
+	 * No need to call MFP_GPIP_Update_Interrupt() in that case, because IERx
+	 * were cleared above, GPIP bits can't trigger the MFP IRQ at this point
+	 */
+	pMFP->GPIP = 0;
+	pMFP->DDR = 0;
+	if ( pMFP == pMFP_Main )
+		MFP_GPIP_Update_Main ( pMFP );
+	else
+		MFP_GPIP_Update_TT ( pMFP );
+
+	/* Clear MFP IRQ */
 	pMFP->Current_Interrupt = -1;
 	pMFP->IRQ = 0;
 	pMFP->IRQ_CPU = 0;
@@ -1186,34 +1205,51 @@ void	MFP_GPIP_Set_Line_Input ( MFP_STRUCT *pMFP , uint8_t LineNr , uint8_t Bit )
 
 //fprintf ( stderr , "gpip set0 mask=%x bit=%d ddr=%x gpip=%x\n", Mask, Bit, pMFP->DDR, pMFP->GPIP );
 
-	/* Special case when changing bit 7 of the main MFP : depending on the machine type, */
-	/* this can be a combination of several signals. So we override Bit with its new value */
-	if ( ( pMFP == pMFP_Main ) && ( LineNr == MFP_GPIP_LINE7 ) )
-		Bit = MFP_Main_Compute_GPIP7 ();
-
-	/* Special case when changing bit 4 of the main MFP : this line is connected */
-	/* to the 2 ACIA's IRQ lines at the same time */
-	if ( ( pMFP == pMFP_Main ) && ( LineNr == MFP_GPIP_LINE_ACIA ) )
-		Bit = MFP_Main_Compute_GPIP_LINE_ACIA ();
-
 	/* Check that corresponding line is defined as input in DDR (0=input 1=output) */
 	/* and that the bit is changing */
-	if ( ( ( pMFP->DDR & Mask ) == 0 )
-	  && ( ( pMFP->GPIP & Mask ) != ( Bit << LineNr ) ) )
+	if ( ( pMFP->DDR & Mask ) == 0 )
 	{
-		GPIP_old = pMFP->GPIP;
-
-		if ( Bit )
+		/* Special cases for the main MFP, we override Bit with its new value */
+		if ( pMFP == pMFP_Main )
 		{
-			pMFP->GPIP |= Mask;
-		}
-		else
-		{
-			pMFP->GPIP &= ~Mask;
+			/* bit 7 of the main MFP : depending on the machine type, */
+			/* this can be a combination of several signals  */
+			if ( LineNr == MFP_GPIP_LINE7 )
+				Bit = MFP_Main_Compute_GPIP7 ();
+
+			/* bit 5 of the main MFP : this line is connected */
+			/* to the FDC and HDC's IRQ lines at the same time */
+			if ( LineNr == MFP_GPIP_LINE_FDC_HDC )
+				Bit = MFP_Main_Compute_GPIP5_FDC_HDC ();
+
+			/* bit 4 of the main MFP : this line is connected */
+			/* to the 2 ACIA's IRQ lines at the same time */
+			if ( LineNr == MFP_GPIP_LINE_ACIA )
+				Bit = MFP_Main_Compute_GPIP4_LINE_ACIA ();
+
+			/* bit 3 of the main MFP : this line is connected */
+			/* to the Blitter's IRQ line or to the DSP's IRQ line */
+			if ( LineNr == MFP_GPIP_LINE_BLITTER_DSP )
+				Bit = MFP_Main_Compute_GPIP3_Blitter_DSP ();
 		}
 
-		/* Update possible interrupts after changing GPIP */
-		MFP_GPIP_Update_Interrupt ( pMFP , GPIP_old , pMFP->GPIP , pMFP->AER , pMFP->AER , pMFP->DDR , pMFP->DDR );
+		/* GPIP bit is changing ? */
+		if ( ( pMFP->GPIP & Mask ) != ( Bit << LineNr ) )
+		{
+			GPIP_old = pMFP->GPIP;
+
+			if ( Bit )
+			{
+				pMFP->GPIP |= Mask;
+			}
+			else
+			{
+				pMFP->GPIP &= ~Mask;
+			}
+
+			/* Update possible interrupts after changing GPIP */
+			MFP_GPIP_Update_Interrupt ( pMFP , GPIP_old , pMFP->GPIP , pMFP->AER , pMFP->AER , pMFP->DDR , pMFP->DDR );
+		}
 	}
 //fprintf ( stderr , "gpip set gpip_old=%x gpip_new=%x\n" , GPIP_old , pMFP->GPIP );
 }
@@ -1914,11 +1950,28 @@ uint8_t    MFP_Main_Compute_GPIP7 ( void )
 
 /*-----------------------------------------------------------------------*/
 /**
+ * Compute value of GPIP bit 5 for main MFP.
+ * This bit is a AND between the FDC and HDC's IRQ (because input
+ * IRQ lines are active low, IRQ is set when line's value is 0)
+ */
+static uint8_t	MFP_Main_Compute_GPIP5_FDC_HDC ( void )
+{
+	uint8_t	Bit;
+
+	/* Bit=O : IRQ ON      Bit=1 : IRQ OFF */
+	Bit = FDC_Get_Line_IRQ_MFP() & HDC_Get_Line_IRQ_MFP();
+
+	return Bit;
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
  * Compute value of GPIP bit 4 for main MFP.
  * This bit is a OR between the 2 ACIA's IRQ for IKBD and Midi
  * NOTE : signal is active low on ACIA, IRQ is set when line's value is 0
  */
-uint8_t    MFP_Main_Compute_GPIP_LINE_ACIA ( void )
+uint8_t    MFP_Main_Compute_GPIP4_LINE_ACIA ( void )
 {
 	uint8_t	Bit;
 
@@ -1937,7 +1990,37 @@ uint8_t    MFP_Main_Compute_GPIP_LINE_ACIA ( void )
 
 /*-----------------------------------------------------------------------*/
 /**
+ * Compute value of GPIP bit 3 for main MFP.
+ *  - on ST/STE this is connected to the Blitter's IRQ
+ *  - on Falcon this is connected to the DSP's IRQ (Blitter's IRQ is not connected)
+ *  - on TT this is connected to CLKDIR (not used in Hatari)
+ *
+ * Blitter's IRQ signal is inverted (0/low irq set, 1/high irq cleared)
+ */
+static uint8_t	MFP_Main_Compute_GPIP3_Blitter_DSP ( void )
+{
+	uint8_t	Bit;
+
+	if ( Blitter_IsAvailable() && ! Config_IsMachineFalcon() )
+		Bit = Blitter_Get_Line_IRQ_MFP();
+
+	else if ( Config_IsMachineFalcon() )
+		Bit = 1;			/* TODO : use the DSP's IRQ */
+
+	else
+		Bit = 1;			/* not used */
+
+	return Bit;
+}
+
+
+/*-----------------------------------------------------------------------*/
+/**
  * Handle read from main MFP GPIP pins register (0xfffa01).
+ *
+ * Get the current value of GPIP and only update the bits where the corresponding
+ * bit in DDR is 0 (=input)
+ * Leave all others bits (=output) untouched and keep their current value
  *
  * - Bit 0 is the BUSY signal of the printer port, it is SET if no printer
  *   is connected or on BUSY. Therefore we should assume it to be 0 in Hatari
@@ -1950,70 +2033,125 @@ uint8_t    MFP_Main_Compute_GPIP_LINE_ACIA ( void )
  * - Bit 6 is used for RS232: RI (inverted, O=RI ON)
  * - Bit 7 is monochrome monitor detection signal and/or dma sound. On STE and TT it is
  *   also XORed with the DMA sound play bit. On Falcon it is only the DMA sound play bit
- *
- * When reading GPIP, output lines (DDR=1) should return the last value that was written,
- * only input lines (DDR=0) should be updated.
  */
-void	MFP_GPIP_ReadByte_Main ( MFP_STRUCT *pMFP )
+
+static void	MFP_GPIP_Update_Main ( MFP_STRUCT *pMFP )
 {
 	uint8_t		gpip_new;
 	uint8_t		dcd,cts;
 
+	/* Get current value to keep bits where DDR=1 (output) */
+	gpip_new = pMFP->GPIP;
+
+	/* Get value of DCD/CTS signals in case RS232 emulation is enabled */
+	RS232_Get_DCD_CTS ( &dcd , &cts );
+
+	/* Bit 7 */
+	if ( ( pMFP->DDR & 0x80 ) == 0 )
+	{
+		if ( MFP_Main_Compute_GPIP7() )
+			gpip_new |= 0x80;		/* set bit 7 */
+		else
+			gpip_new &= ~0x80;		/* clear bit 7 */
+	}
+
+	/* Bit 6 */
+	if ( ( pMFP->DDR & 0x40 ) == 0 )
+	{
+		// not emulated, keep value
+	}
+
+	/* Bit 5 */
+	if ( ( pMFP->DDR & 0x20 ) == 0 )
+	{
+		if ( MFP_Main_Compute_GPIP5_FDC_HDC() )
+			gpip_new |= 0x20;		/* set bit 5 */
+		else
+			gpip_new &= ~0x20;		/* clear bit 5 */
+	}
+
+	/* Bit 4 */
+	if ( ( pMFP->DDR & 0x10 ) == 0 )
+	{
+		if ( MFP_Main_Compute_GPIP4_LINE_ACIA() )
+			gpip_new |= 0x10;		/* set bit 4 */
+		else
+			gpip_new &= ~0x10;		/* clear bit 4 */
+	}
+
+	/* Bit 3 */
+	if ( ( pMFP->DDR & 0x08 ) == 0 )
+	{
+		if ( MFP_Main_Compute_GPIP3_Blitter_DSP() )
+			gpip_new |= 0x08;		/* set bit 3 */
+		else
+			gpip_new &= ~0x08;		/* clear bit 3 */
+	}
+
+	/* Bit 2 : CTS (inverted, 0=ON) */
+	if ( ( pMFP->DDR & 0x04 ) == 0 )
+	{
+		if ( !cts )
+			gpip_new |= 0x04;		/* set bit 2 */
+		else
+			gpip_new &= ~0x04;		/* clear bit 2 */
+	}
+
+	/* Bit 1 : DCD (inverted, 0=ON) */
+	if ( ( pMFP->DDR & 0x02 ) == 0 )
+	{
+		if ( !dcd )
+			gpip_new |= 0x02;		/* set bit 1 */
+		else
+			gpip_new &= ~0x02;		/* clear bit 1 */
+	}
+
+	/* Bit 0 */
+	if ( ( pMFP->DDR & 0x01 ) == 0 )
+		{
+		if (ConfigureParams.Printer.bEnablePrinting)
+		{
+			/* Signal that printer is not busy */
+			gpip_new &= ~1;
+		}
+		else
+		{
+			gpip_new |= 1;
+
+			/* Printer BUSY bit is also used by parallel port joystick adapters as fire button */
+			if (ConfigureParams.Joysticks.Joy[JOYID_PARPORT1].nJoystickMode != JOYSTICK_DISABLED)
+			{
+				/* Fire pressed? */
+				if (Joy_GetStickData(JOYID_PARPORT1) & 0x80)
+					gpip_new &= ~1;
+			}
+		}
+	}
+
+	/* Store new value */
+	pMFP->GPIP = gpip_new;
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Handle read from main MFP GPIP pins register (0xfffa01).
+ *
+ * The value of GPIP is first updated with MPF_GPIP_Update_Main()
+ *
+ * When reading GPIP, output lines (DDR=1) should return the last value that was written,
+ * only input lines (DDR=0) should be updated.
+ */
+
+void	MFP_GPIP_ReadByte_Main ( MFP_STRUCT *pMFP )
+{
 	M68000_WaitState(4);
 
 	/* Update timers' state before reading the register */
 	MFP_UpdateTimers ( pMFP , Cycles_GetClockCounterImmediate() );
 
-	/* Get value of DCD/CTS signals in case RS232 emulation is enabled */
-	RS232_Get_DCD_CTS ( &dcd , &cts );
-
-	gpip_new = pMFP->GPIP;
-
-	/* Bit 7 */
-	if ( MFP_Main_Compute_GPIP7() )
-		gpip_new |= 0x80;		/* set bit 7 */
-	else
-		gpip_new &= ~0x80;		/* clear bit 7 */
-
-	/* Bit 4 */
-	if ( MFP_Main_Compute_GPIP_LINE_ACIA() )
-		gpip_new |= 0x10;		/* set bit 4 */
-	else
-		gpip_new &= ~0x10;		/* clear bit 4 */
-
-	/* Bit 2 : CTS (inverted, 0=ON) */
-	if ( !cts )
-		gpip_new |= 0x04;		/* set bit 2 */
-	else
-		gpip_new &= ~0x04;		/* clear bit 2 */
-
-	/* Bit 1 : DCD (inverted, 0=ON) */
-	if ( !dcd )
-		gpip_new |= 0x02;		/* set bit 1 */
-	else
-		gpip_new &= ~0x02;		/* clear bit 1 */
-
-	/* Bit 0 */
-	if (ConfigureParams.Printer.bEnablePrinting)
-	{
-		/* Signal that printer is not busy */
-		gpip_new &= ~1;
-	}
-	else
-	{
-		gpip_new |= 1;
-
-		/* Printer BUSY bit is also used by parallel port joystick adapters as fire button */
-		if (ConfigureParams.Joysticks.Joy[JOYID_PARPORT1].nJoystickMode != JOYSTICK_DISABLED)
-		{
-			/* Fire pressed? */
-			if (Joy_GetStickData(JOYID_PARPORT1) & 0x80)
-				gpip_new &= ~1;
-		}
-	}
-
-	gpip_new &= ~pMFP->DDR;					/* New input bits */
-	pMFP->GPIP = ( pMFP->GPIP & pMFP->DDR ) | gpip_new; 	/* Keep output bits unchanged and update input bits */
+	MFP_GPIP_Update_Main ( pMFP );
 
 	IoMem[IoAccessCurrentAddress] = pMFP->GPIP;
 
@@ -2031,25 +2169,102 @@ void	MFP_GPIP_ReadByte_Main ( MFP_STRUCT *pMFP )
 /**
  * Handle read from TT MFP GPIP pins register (0xfffa81)
  *
+ * Get the current value of GPIP and only update the bits where the corresponding
+ * bit in DDR is 0 (=input)
+ * Leave all others bits (=output) untouched and keep their current value
+ *
+ * - Bit 0 : connected to external I/O pin
+ * - Bit 1 : connected to external I/O pin
+ * - Bit 2 : DMA controller, active low (0=IRQ set, 1=IRQ not set) (XDMAIRQ)
+ * - Bit 3 : SCC serial port B, ring indicator (RI) signal (XBRIRQ)
+ * - Bit 4 : Internal floppy drive pin 34, NOT disk change (DC) signal (0=inserted 1=ejected) (DCH)
+ * - Bit 5 : SCSI DMA controller, active low (0=IRQ set, 1=IRQ not set) (XSDMAIRQ)
+ * - Bit 6 : RTC MC146818A, active low (0=IRQ set, 1=IRQ not set) (XRTCIRQ)
+ * - Bit 7 : SCSI NCR5380, active *high* (1=IRQ set, 0=IRQ not set) (SCSIRQ)
+ */
+
+static void	MFP_GPIP_Update_TT ( MFP_STRUCT *pMFP )
+{
+	uint8_t		gpip_new;
+
+	/* Get current value to keep bits where DDR=1 (output) */
+	gpip_new = pMFP->GPIP;
+
+	/* Bit 7 : SCSI NCR5380 */
+	if ( ( pMFP->DDR & 0x80 ) == 0 )
+	{
+		if ( Ncr5380_Get_Line_IRQ_MFP() )
+			gpip_new |= 0x80;		/* set bit 7 */
+		else
+			gpip_new &= ~0x80;		/* clear bit 7 */
+
+	}
+
+	/* Bit 6 : RTC MC146818A */
+	if ( ( pMFP->DDR & 0x40 ) == 0 )
+	{
+		if ( MC146818_Get_Line_IRQ() )
+			gpip_new |= 0x40;		/* set bit 6 */
+		else
+			gpip_new &= ~0x40;		/* clear bit 6 */
+	}
+
+	/* Bit 5 : SCSI DMA controller */
+	if ( ( pMFP->DDR & 0x20 ) == 0 )
+	{
+		/* not emulated yet */
+		gpip_new |= 0x20;			/* set bit 5 */
+	}
+
+	/* Bit 4 : Disk change */
+	if ( ( pMFP->DDR & 0x10 ) == 0 )
+	{
+		if ( FDC_Drive_Get_DC_signal() )
+			gpip_new |= 0x10;		/* set bit 4 */
+		else
+			gpip_new &= ~0x10;		/* clear bit 4 */
+	}
+
+	/* Bit 3 : SCC serial port B, ring indicator */
+	if ( ( pMFP->DDR & 0x08 ) == 0 )
+	{
+		/* not emulated yet */
+		gpip_new |= 0x08;			/* set bit 3 */
+	}
+
+	/* Bit 2 : DMA controller */
+	if ( ( pMFP->DDR & 0x04 ) == 0 )
+	{
+		/* not emulated yet */
+		gpip_new |= 0x04;			/* set bit 2 */
+	}
+
+	/* Bits 0 and 1 : connected to external I/O pins, not emulated */
+
+	/* Store new value */
+	pMFP->GPIP = gpip_new;
+}
+
+
+
+/*-----------------------------------------------------------------------*/
+/**
+ * Handle read from TT MFP GPIP pins register (0xfffa81)
+ *
+ * The value of GPIP is first updated with MPF_GPIP_Update_TT()
  *
  * When reading GPIP, output lines (DDR=1) should return the last value that was written,
  * only input lines (DDR=0) should be updated.
  */
+
 void	MFP_GPIP_ReadByte_TT ( MFP_STRUCT *pMFP )
 {
-	uint8_t	gpip_new;
-
 	M68000_WaitState(4);
 
 	/* Update timers' state before reading the register */
 	MFP_UpdateTimers ( pMFP , Cycles_GetClockCounterImmediate() );
 
-	/* TODO : handle all bits, bit 7 is scsi, bit 4 is DC signal, other bits default to 1 for now */
-	gpip_new = pMFP->GPIP;
-	gpip_new |= 0x6f;					/* force bits 0-3 and 5-6 to 1 */
-
-	gpip_new &= ~pMFP->DDR;					/* New input bits */
-	pMFP->GPIP = ( pMFP->GPIP & pMFP->DDR ) | gpip_new; 	/* Keep output bits unchanged and update input bits */
+	MFP_GPIP_Update_TT ( pMFP );
 
 	IoMem[IoAccessCurrentAddress] = pMFP->GPIP;
 
