@@ -23,14 +23,15 @@
  * mode. */
 #define COMBEL_REFILL_LONGS		17
 
-/* CPU cycles that refill holds ST-RAM, at the emulated CPU clock: ~19 at
- * 16 MHz, i.e. 38 ticks of the CLK32 domain COMBEL and Videl actually share,
- * or ~70 ns per long out of 80 ns FPM DRAM with a ~150 ns full cycle.  One
- * technical guide instead phrases the transfer as "4 cycles per burst cycle",
- * which does not reconcile with the 19 without knowing which clock domain it
- * counts, so this stays a configurable timing profile rather than a baked-in
- * constant. */
-#define COMBEL_REFILL_CYCLES_DEFAULT	19
+/* CPU cycles that refill holds ST-RAM, at the emulated CPU clock.  The
+ * sourced figure was ~19 at 16 MHz (38 CLK32 ticks).  Measured on a Falcon030
+ * with F030Arcade's f030probe (2026-11-23, section 6, RGB, TOS 4.02): the
+ * 68030's extra cost per cache-missing ST-RAM long read while the display
+ * fetches is 0.41 / 0.73 / 1.31 / 3.17 clocks at 80 / 160 / 320 / 640 bytes
+ * per line, and 25 clocks per 17-long refill reproduces all four (0.34 /
+ * 0.65 / 1.65 / 2.95) and the falling cost across the line after display end;
+ * 19 gives 0.20 / 0.46 / 0.92 / 2.17.  --videl-burst-cycles overrides it. */
+#define COMBEL_REFILL_CYCLES_DEFAULT	25
 
 /* What Videl tells COMBEL about its appetite for source data.  Filled in by
  * videl.c, which owns the register semantics; COMBEL turns it into a refill

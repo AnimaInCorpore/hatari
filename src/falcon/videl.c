@@ -1105,14 +1105,20 @@ void VIDEL_UpdateBusDemand(void)
 	}
 	demand.line_cycles = MachineClocks.CPU_Freq_Emul / hfreq;
 
-	/* Lines of source data, from VDB/VDE.  Both count half lines unless the
-	 * interlace bit is set.  A line-doubled mode shows each source line on
-	 * two scan lines but reads it once: mikro measured doubling costing a
-	 * few percent, not the doubling that a displayed-pixel model predicts. */
+	/* Lines of source data, from VDB/VDE.  Both count half lines, in an
+	 * interlaced mode too: TOS 4's 640x400 RGB modes program VFT $270 (624
+	 * half lines, 312 per field) and VDB/VDE $7E/$20E, 200 lines a field,
+	 * each fetching one full source line -- f030probe measured their bus
+	 * steal following the bytes per scanned line like any other mode
+	 * (2026-11-23).  Counting whole lines here made every interlaced mode
+	 * fail the 40 Hz check below and switched contention off.  A
+	 * line-doubled mode shows each source line on two scan lines but reads
+	 * it once: mikro measured doubling costing a few percent, not the
+	 * doubling that a displayed-pixel model predicts. */
 	vmode = IoMem_ReadWord(0xff82c2);
 	vdb = IoMem_ReadWord(0xff82a8) & 0x07ff;
 	vde = IoMem_ReadWord(0xff82aa) & 0x07ff;
-	hlshift = (vmode & 0x02) ? 0 : 1;
+	hlshift = 1;
 	if (vde <= vdb) {
 		Combel_Video_Idle();
 		return;

@@ -32,9 +32,140 @@
 #include "events.h"
 #include "configuration.h"
 #include "cpu030_timing.h"
+#include "stMemory.h"
 
 bool cpu030t_enabled;
 int cpu030t_stram_long_write;
+bool cpu030t_bus_on;
+
+/* Falcon bus extras, CPU clocks (see cpu030_timing.h).  Hardware against
+ * the c93698f7 core, f030probe lines io.* / cache.dc0.* / vid.*.burst.*.vbl
+ * (Falcon030, TOS 4.02, 2026-11-23):
+ *   ST-RAM: a read and a word write cost ~1 clock more per access; a long
+ *     write ~0.7 less than the +2 between its halves (dspmark's fit) gave.
+ *   ROM:    word read 8.24 (core 6.16), long read 13.32 (9.20).
+ *   I/O:    every 16-bit register on the Videl/Blitter side 7.24 per read
+ *     (3.16), 5.16 per write (3.20), a long 11.28 / 9.12 (6.16 / 6.16);
+ *     DMA sound/crossbar 8.24 / 6.12; MFP 16.2 (7.16); YM 13.32 / 11.12
+ *     (7.16); ACIA 16.32 (10.24); SCC 13.28 (3.12); FDC/DMA 14.64 (3.16);
+ *     the DSP host port already matches (6.24 / 6.16). */
+/* ST-RAM extras in eighths of a clock, spread by an accumulator per access
+ * class: the core's ST-RAM port works on a 4-clock slot grid where one more
+ * clock costs 0 or 2, while the hardware's gaps are fractional means
+ * (+1.28 word read, +1.40 long read, +1.20 word write).  lw8 is the wait
+ * between the word halves of a long write, which replaces
+ * cpu030t_stram_long_write while the bus model is on. */
+enum { BX_RD, BX_RDL, BX_WR, BX_LW, BX_NCLASS };
+/* Fitted with f030probe section 6 (sustained and vertical-blank lines in
+ * 80, 320 and 640 bytes-per-line modes, TOS 4.02): within ~0.3 of the
+ * hardware, which the 4-clock slot grid does not let a constant beat. */
+static int bx_st8[BX_NCLASS] = { 6, 5, 3, 11 };
+static int bx_acc[BX_NCLASS];
+static int bx_st_pre = 1;
+static int bx_rom_w = 2, bx_rom_l = 4;
+int cpu030t_bus_pre;			/* ST-RAM extras go before the bus-slot alignment */
+
+static int bx_take(int cls)
+{
+	int n;
+
+	bx_acc[cls] += bx_st8[cls];
+	n = bx_acc[cls] >> 3;
+	bx_acc[cls] &= 7;
+	return n;
+}
+
+static int bx_st(int size, bool write)
+{
+	if (write && size == 4)
+		return 0;		/* the halves' wait: cpu030t_stram_lw_clocks() */
+	return bx_take(write ? BX_WR : (size == 4 ? BX_RDL : BX_RD));
+}
+
+/* Clocks between the word halves of a long ST-RAM write. */
+int cpu030t_stram_lw_clocks(void)
+{
+	if (!cpu030t_bus_on)
+		return cpu030t_stram_long_write;
+	return bx_take(BX_LW);
+}
+
+struct bx_dev { uae_u32 lo, hi; uae_s8 rd, wr, rdl, wrl; };
+static const struct bx_dev bx_devs[] = {
+	{ 0xff8600, 0xff860f, 11, 11, 22, 22 },	/* FDC / DMA */
+	{ 0xff8800, 0xff88ff,  6,  4, 12,  8 },	/* YM2149 */
+	{ 0xff8900, 0xff89ff,  5,  3,  6,  4 },	/* DMA sound, crossbar */
+	{ 0xff8c80, 0xff8cff, 10, 10, 20, 20 },	/* SCC */
+	{ 0xffa200, 0xffa2ff,  0,  0,  0,  0 },	/* DSP host port: dspmark-calibrated */
+	{ 0xfffa00, 0xfffa3f,  9,  9, 18, 18 },	/* MFP */
+	{ 0xfffc00, 0xfffc3f,  2,  2,  4,  4 },	/* ACIAs (the core's E-clock sync gives the rest) */
+	{ 0xff8000, 0xffffff,  4,  2,  5,  3 },	/* everything else: Videl, palettes, Blitter, ... */
+};
+
+int cpu030t_bus_extra(uaecptr addr, int size, bool write)
+{
+	uae_u32 a;
+	unsigned i;
+
+	if ((addr >> 24) != 0 && (addr >> 24) != 0xff)
+		return 0;			/* TT-RAM and beyond */
+	a = addr & 0x00ffffff;
+	if (a < STRamEnd) {
+		if (bx_st_pre)
+			return 0;		/* charged by cpu030t_bus_pre_extra() */
+		return bx_st(size, write);
+	}
+	if (a >= 0xe00000 && a < 0xf00000)
+		return write ? 0 : (size == 4 ? bx_rom_l : bx_rom_w);
+	if (a < 0xff8000)
+		return 0;
+	for (i = 0; i < sizeof bx_devs / sizeof bx_devs[0]; i++) {
+		const struct bx_dev *d = &bx_devs[i];
+		if (a >= d->lo && a <= d->hi) {
+			if (size == 4)
+				return write ? d->wrl : d->rdl;
+			return write ? d->wr : d->rd;
+		}
+	}
+	return 0;
+}
+
+int cpu030t_bus_pre_extra(uaecptr addr, int size, bool write)
+{
+	uae_u32 a;
+
+	if ((addr >> 24) != 0 && (addr >> 24) != 0xff)
+		return 0;
+	a = addr & 0x00ffffff;
+	if (a >= STRamEnd)
+		return 0;
+	return bx_st(size, write);
+}
+
+static void bus_init(void)
+{
+	const char *env = getenv("HATARI_F030_BUS");
+
+	cpu030t_bus_on = false;
+	cpu030t_bus_pre = 0;
+	if (!cpu030t_enabled || !Config_IsMachineFalcon())
+		return;
+	if (env && strcmp(env, "off") == 0)
+		return;
+	/* HATARI_F030_ST=read,longread,write,longhalves,pre: the ST-RAM extras in
+	 * eighths of a clock, and 1 to charge them before the access's bus-slot
+	 * alignment (the default), 0 after it */
+	env = getenv("HATARI_F030_ST");
+	if (env)
+		sscanf(env, "%d,%d,%d,%d,%d", &bx_st8[BX_RD], &bx_st8[BX_RDL], &bx_st8[BX_WR],
+		       &bx_st8[BX_LW], &bx_st_pre);
+	memset(bx_acc, 0, sizeof bx_acc);
+	cpu030t_bus_pre = bx_st_pre;
+	cpu030t_bus_on = true;
+	Log_Printf(LOG_INFO, "Falcon bus: f030probe-measured extras on (ST-RAM read +%d/8, long read +%d/8, write +%d/8%s, long write halves +%d/8 clocks; ROM, I/O per device); HATARI_F030_BUS=off disables\n",
+		   bx_st8[BX_RD], bx_st8[BX_RDL], bx_st8[BX_WR], bx_st_pre ? " before the slot" : "",
+		   bx_st8[BX_LW]);
+}
 
 enum { K_NONE, K_PLAIN, K_BCC, K_DBCC };
 
@@ -226,6 +357,7 @@ void cpu030t_init(void)
 	bool asked;
 
 	cpu030t_enabled = false;
+	cpu030t_bus_on = false;
 	cpu030t_stram_long_write = 0;
 	/* On by default on a Falcon; HATARI_CPU030_TIMING=off gives the bare
 	 * cycle-exact core, =manual turns the model on for any 68030 machine */
@@ -258,6 +390,7 @@ void cpu030t_init(void)
 	}
 	Log_Printf(LOG_INFO, "68030 timing: MC68030 User's Manual instruction-cache-case model, ST-RAM long write +%d clocks (HATARI_CPU030_TIMING=off for the bare core)\n",
 		   cpu030t_stram_long_write);
+	bus_init();
 }
 
 /* A data access of the bus model, from start to end in cycle units.

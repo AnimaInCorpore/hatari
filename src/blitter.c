@@ -126,6 +126,8 @@ const char Blitter_fileid[] = "Hatari blitter.c";
 #include "video.h"
 #include "hatari-glue.h"
 #include "falcon/dsp.h"
+#include "combel.h"
+#include <string.h>
 
 
 /* BLiTTER registers, incs are signed, others unsigned */
@@ -510,6 +512,42 @@ static void Blitter_BusArbitration ( int RequestBusMode )
  * Low level memory accesses to read / write a word
  * For each word access we increment the blitter's bus accesses counter.
  */
+/*-----------------------------------------------------------------------*/
+/**
+ * Falcon: CPU cycles one Blitter bus access holds the bus.  Measured on a
+ * Falcon030 with F030Arcade's f030probe (2026-11-23, TOS 4.02, the desktop's
+ * 640x400 16-colour RGB mode): 5.65 cycles per word for fill and clear, 11.25
+ * for a copy (read + write), 16.90 for XOR (two reads + write) -- a uniform
+ * cost per access, where the STE's 4 gave 4.00 / 8.05 / 12.05.  With the
+ * Blitter clock at 8 MHz ($FFFF8007 bit 2 clear) a copy costs 17.80.  The
+ * Blitter ranks below video at COMBEL, so an access also waits out a Videl
+ * refill.  The base values are in eighths of a cycle and spread by an
+ * accumulator; HATARI_F030_BLIT=fast8,slow8 overrides them.
+ */
+static int	Blitter_Falcon_Eighths[2] = { 42, 67 };	/* 16 MHz, 8 MHz Blitter: fitted */
+static int	Blitter_Falcon_Acc;
+static int	Blitter_Falcon_Init = -1;
+
+static int Blitter_Falcon_AccessCycles ( uint32_t addr )
+{
+	int n, slow, stall = 0;
+
+	if ( Blitter_Falcon_Init < 0 )
+	{
+		const char *env = getenv ( "HATARI_F030_BLIT" );
+		if ( env )
+			sscanf ( env , "%d,%d" , &Blitter_Falcon_Eighths[0] , &Blitter_Falcon_Eighths[1] );
+		Blitter_Falcon_Init = 1;
+	}
+	slow = ( IoMem_ReadByte ( 0xff8007 ) & 0x04 ) ? 0 : 1;
+	if ( Combel_StRam_Contended )
+		stall = Combel_StRam_Stall ( CyclesGlobalClockCounter , addr );
+	Blitter_Falcon_Acc += Blitter_Falcon_Eighths[ slow ];
+	n = Blitter_Falcon_Acc >> 3;
+	Blitter_Falcon_Acc &= 7;
+	return n + ( stall > 0 ? stall : 0 );
+}
+
 static uint16_t Blitter_ReadWord(uint32_t addr)
 {
 	uint16_t value;
@@ -517,7 +555,10 @@ static uint16_t Blitter_ReadWord(uint32_t addr)
 	value = STMemory_DMA_ReadWord ( addr );
 
 	BlitterState.CountBusBlitter++;
-	Blitter_AddCycles ( BLITTER_CYCLES_PER_BUS_READ );
+	if ( Config_IsMachineFalcon() )
+		Blitter_AddCycles ( Blitter_Falcon_AccessCycles ( addr ) );
+	else
+		Blitter_AddCycles ( BLITTER_CYCLES_PER_BUS_READ );
 	Blitter_FlushCycles();
 
 	BlitterState.bus_word = value;
@@ -531,7 +572,10 @@ static void Blitter_WriteWord(uint32_t addr, uint16_t value)
 	STMemory_DMA_WriteWord ( addr ,  value );
 
 	BlitterState.CountBusBlitter++;
-	Blitter_AddCycles ( BLITTER_CYCLES_PER_BUS_WRITE );
+	if ( Config_IsMachineFalcon() )
+		Blitter_AddCycles ( Blitter_Falcon_AccessCycles ( addr ) );
+	else
+		Blitter_AddCycles ( BLITTER_CYCLES_PER_BUS_WRITE );
 	Blitter_FlushCycles();
 }
 
@@ -973,6 +1017,7 @@ static int	Blitter_CPU030_Disabled = -1;
 
 static void	Blitter_CPU030_Reset ( void )
 {
+	Blitter_Falcon_Acc = 0;
 	Blitter_CPU030_ParallelCycles = 0;
 	Blitter_CPU030_Active = 0;
 	Blitter_CPU030_BaseCycles = 0;
@@ -1000,6 +1045,7 @@ static void	Blitter_CPU030_SetParallel ( int cycles )
  */
 void	Blitter_CPU030_BusAccess ( void )
 {
+
 	int	par = (int)( currcycle * 2 / CYCLE_UNIT ) - Blitter_CPU030_BaseCycles;
 
 	if ( par > Blitter_CPU030_ParallelCycles )
