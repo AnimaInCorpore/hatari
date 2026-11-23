@@ -110,6 +110,30 @@ static uint32_t cur_inst;
 /* Counts the number of access to the external memory for one instruction */
 static uint16_t access_to_ext_memory;
 
+/* Port A wait states (DSP56001 UM 9.2.2): the BCR at X:$FFFE holds one 4-bit
+ * field per external space -- X in bits 15-12, Y in 11-8, P in 7-4, I/O in
+ * 3-0 -- and each wait state adds one clock (half an instruction cycle) to
+ * every access to that space.  Reset leaves $FFFF, fifteen wait states.
+ * Measured on a Falcon030 by F030MXDRV's dspprobe (2026-09-02): 17 clocks per
+ * external P fetch, X read or Y read with the reset value, 2 once cleared.
+ * Charged per access; HATARI_DSP_BCR=ignore restores the old zero-wait
+ * model. */
+static uint16_t ext_access_count[3];
+static int	dsp_bcr_mode = -1;		/* 1 = charge, 0 = ignore */
+static uint32_t	rep_fetch_pc = 0xffffffff;	/* PC of a REP'd instruction already fetched */
+
+static int DSP_BcrMode(void)
+{
+	const char *env;
+
+	if (unlikely(dsp_bcr_mode < 0)) {
+		dsp_bcr_mode = 1;
+		if ((env = getenv("HATARI_DSP_BCR")) != NULL && strcmp(env, "ignore") == 0)
+			dsp_bcr_mode = 0;
+	}
+	return dsp_bcr_mode;
+}
+
 /* Extra cycles charged for JCLR/JSET on the peripheral (pp) space, ie the
  * "poll a host interface flag" loop that every DSP<->CPU transfer is built
  * from. Upstream charges 4 on top of the base 2 = 6 clocks. DSPBench v3.0b's
@@ -782,6 +806,7 @@ void dsp56k_execute_instruction(void)
 	/* Initialise the number of access to the external memory for this instruction */
 	/* for cycles counting */
 	access_to_ext_memory = 0;
+	ext_access_count[DSP_SPACE_X] = ext_access_count[DSP_SPACE_Y] = ext_access_count[DSP_SPACE_P] = 0;
 
 	/* Init the indirect AGU move instruction flag */
 	dsp_core.agu_move_indirect_instr = 0;
@@ -793,6 +818,17 @@ void dsp56k_execute_instruction(void)
 
 	/* Decode and execute current instruction */
 	cur_inst = read_memory_p(dsp_core.pc);
+
+	/* An instruction under REP is fetched once (DSP56001 UM, REP): its
+	 * repetitions do not use the external program bus again. */
+	if (!dsp_core.loop_rep) {
+		rep_fetch_pc = 0xffffffff;
+	} else if (rep_fetch_pc == dsp_core.pc) {
+		if (ext_access_count[DSP_SPACE_P] > 0)
+			ext_access_count[DSP_SPACE_P]--;
+	} else {
+		rep_fetch_pc = dsp_core.pc;
+	}
 
 	/* Initialize instruction size and cycle counter */
 	cur_inst_len = 1;
@@ -830,6 +866,14 @@ void dsp56k_execute_instruction(void)
 
 		if (value > 1)
 			dsp_core.instr_cycle += (value - 1) * 2;
+
+		/* BCR wait states, one clock each, per external access */
+		if (DSP_BcrMode()) {
+			uint32_t bcr = dsp_core.periph[DSP_SPACE_X][DSP_BCR];
+			dsp_core.instr_cycle += ext_access_count[DSP_SPACE_X] * ((bcr >> 12) & 15)
+					     + ext_access_count[DSP_SPACE_Y] * ((bcr >> 8) & 15)
+					     + ext_access_count[DSP_SPACE_P] * ((bcr >> 4) & 15);
+		}
 	}
 
 	/* Process the AGU pipeline */
@@ -1281,6 +1325,7 @@ static inline uint32_t read_memory_p(uint16_t address)
 
 	/* Access to the external P memory */
 	access_to_ext_memory |= 1 << DSP_SPACE_P;
+	ext_access_count[DSP_SPACE_P]++;
 
 	/* External RAM, mask address to available ram size */
 	return dsp_core.ramext[address & (DSP_RAMSIZE-1)] & BITMASK(24);
@@ -1324,6 +1369,7 @@ static uint32_t read_memory(int space, uint16_t address)
 
 	/* Access to external memory */
 	access_to_ext_memory |= 1 << space;
+	ext_access_count[space]++;
 
 	/* Falcon: External X or Y RAM access */
 	address &= (DSP_RAMSIZE>>1) - 1;
@@ -1441,6 +1487,7 @@ static void write_memory_raw(int space, uint16_t address, uint32_t value)
 
 	/* Access to external memory */
 	access_to_ext_memory |= 1 << space;
+	ext_access_count[space]++;
 
 	/* Access to X, Y or P external RAM */
 
