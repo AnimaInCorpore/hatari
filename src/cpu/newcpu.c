@@ -37,6 +37,7 @@
 #include "cpummu030.h"
 #include "cputbl.h"
 #include "cpu_prefetch.h"
+#include "cpu030_timing.h"
 #include "debugmem.h"
 #include "savestate.h"
 #include "fpp.h"
@@ -7031,6 +7032,7 @@ static void m68k_run_2ce (void)
 	CpuRunCycleExact = true;
 	CpuRunFuncNoret = true;
 #endif
+	cpu030t_init();
 
 	while (!exit) {
 		check_debugger();
@@ -7166,6 +7168,8 @@ fprintf ( stderr , "cache valid %d tag1 %x lws1 %x ctag %x data %x mem=%x\n" , c
 				(*cpufunctbl_noret[r->opcode])(r->opcode);
 		
 				wait_memory_cycles();
+				if (cpu030t_enabled)
+					cpu030t_instruction_end(r->opcode, r->instruction_pc);
 				regs.instruction_cnt++;
 
 #ifdef WINUAE_FOR_HATARI
@@ -9710,6 +9714,8 @@ uae_u32 mem_access_delay_long_read_ce020 (uaecptr addr)
 	}
 //fprintf ( stderr , "long read2 ce020 %lu %lu\n" , currcycle / cpucycleunit , currcycle );
 	end_020_cycle();
+	if (cpu030t_enabled)
+		cpu030t_access(addr, regs.ce020startcycle, regs.ce020endcycle, false);
 //fprintf ( stderr , "long read3 ce020 %lu %lu\n" , currcycle / cpucycleunit , currcycle );
 	return v;
 }
@@ -9808,6 +9814,8 @@ uae_u32 mem_access_delay_word_read_ce020 (uaecptr addr)
 		break;
 	}
 	end_020_cycle();
+	if (cpu030t_enabled)
+		cpu030t_access(addr, regs.ce020startcycle, regs.ce020endcycle, false);
 	return v;
 }
 
@@ -9831,6 +9839,8 @@ uae_u32 mem_access_delay_byte_read_ce020 (uaecptr addr)
 		break;
 	}
 	end_020_cycle();
+	if (cpu030t_enabled)
+		cpu030t_access(addr, regs.ce020startcycle, regs.ce020endcycle, false);
 	return v;
 }
 
@@ -9853,6 +9863,8 @@ void mem_access_delay_byte_write_ce020 (uaecptr addr, uae_u32 v)
 	break;
 	}
 	end_020_cycle();
+	if (cpu030t_enabled)
+		cpu030t_access(addr, regs.ce020startcycle, regs.ce020endcycle, true);
 }
 
 void mem_access_delay_word_write_ce020 (uaecptr addr, uae_u32 v)
@@ -9882,6 +9894,8 @@ void mem_access_delay_word_write_ce020 (uaecptr addr, uae_u32 v)
 	break;
 	}
 	end_020_cycle();
+	if (cpu030t_enabled)
+		cpu030t_access(addr, regs.ce020startcycle, regs.ce020endcycle, true);
 }
 
 void mem_access_delay_long_write_ce020 (uaecptr addr, uae_u32 v)
@@ -9891,6 +9905,10 @@ void mem_access_delay_long_write_ce020 (uaecptr addr, uae_u32 v)
 	{
 	case CE_MEMBANK_CHIP16:
 		wait_cpu_cycle_write_ce020 (addr + 0, 1, (v >> 16) & 0xffff);
+		/* The second, bus-sized half of a long write to the 16-bit
+		 * ST-RAM port (cpu030_timing.c, cpu030t_stram_long_write) */
+		if (cpu030t_stram_long_write)
+			x_do_cycles (cpu030t_stram_long_write * cpucycleunit);
 		wait_cpu_cycle_write_ce020 (addr + 2, 1, (v >>  0) & 0xffff);
 		break;
 	case CE_MEMBANK_CHIP32:
@@ -9917,6 +9935,8 @@ void mem_access_delay_long_write_ce020 (uaecptr addr, uae_u32 v)
 		break;
 	}
 	end_020_cycle();
+	if (cpu030t_enabled)
+		cpu030t_access(addr, regs.ce020startcycle, regs.ce020endcycle, true);
 }
 
 
