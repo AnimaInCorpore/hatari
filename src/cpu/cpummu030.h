@@ -10,6 +10,8 @@
 #define MMU_DPAGECACHE030 1
 #define MMU_IPAGECACHE030 1
 
+extern int mmu030_walk_clocks, mmu030_pflush_clocks, mmu030_faultb_clocks;	/* cycle-exact table walk, PFLUSH, long-frame fault (cpummu030.c) */
+
 extern uae_u64 srp_030, crp_030;
 extern uae_u32 tt0_030, tt1_030, tc_030;
 extern uae_u16 mmusr_030;

@@ -32,6 +32,8 @@
 #include "fpp.h"
 #include "savestate.h"
 #include "cpummu030.h"
+#include "cpu030_timing.h"
+#include "cycles.h"
 #include "debug.h"
 
 #ifndef CPU_TESTER
@@ -2220,7 +2222,42 @@ static void trace_t0_68040(void)
 
 static evt_t fpu_timing_start, fpu_busy_until;
 
-#if 0
+/* Upstream switched this model off (75b47d64: long FPU waits delay video
+ * interrupts). The F030Arcade fork runs it whenever its Falcon timing model
+ * is on: f030probe measured a 68882 at 41 / 62 / 91 / 94 cycles for fadd /
+ * fmul / fdiv / fsqrt, which this model gives within 3 %, where the
+ * disabled one charged nothing (2026-11-24). HATARI_F030_FPU=off disables. */
+#if 1
+/* A monotonic clock in currcycle units: Hatari's get_cycles() is currcycle,
+ * which the cycle-exact loop zeroes before every instruction, so a busy time
+ * kept from one FPU instruction to the next must not be measured with it (the
+ * stale fpu_busy_until made every following instruction wait up to the 4096-
+ * clock cap: a fnop loop crawled, 2026-11-24). */
+static evt_t fpu_timing_now(void)
+{
+	return (evt_t)CyclesGlobalClockCounter * (CYCLE_UNIT / 2) + currcycle;
+}
+static int fpu_timing_env = -1;
+/* The manual's clocks assume a fast 32-bit bus; on a Falcon every long word of
+ * an operand the 68030 carries between memory and the 68882 costs more:
+ * fitted to f030probe (fmove.d / fmovem store 8.6-9.9 clocks short a long
+ * word, loads 1.4-3.6; 2026-11-24). HATARI_F030_FPU=st,ld refits. */
+static int fpu_mem_st_clocks = 10, fpu_mem_ld_clocks = 3;
+static int fpu_timing_longs(uae_u16 extra)
+{
+	static const uae_u8 longs[8] = { 1, 1, 3, 3, 1, 2, 1, 3 };	// L S X P W D B P
+	return longs[(extra >> 10) & 7];
+}
+static bool fpu_timing_on(void)
+{
+	if (fpu_timing_env < 0) {
+		const char *env = getenv("HATARI_F030_FPU");
+		fpu_timing_env = !(env && strcmp(env, "off") == 0);
+		if (env && fpu_timing_env)
+			sscanf(env, "%d,%d", &fpu_mem_st_clocks, &fpu_mem_ld_clocks);
+	}
+	return fpu_timing_env && cpu030t_enabled;
+}
 struct fpu_op_timing {
 	// FPn,FPn: 68881 total, 68882 tail, 68040 FPU latency, 68060 total.
 	// -1: not implemented in this FPU.
@@ -2326,7 +2363,9 @@ static evt_t fpu_timing_clock(void)
 
 static void fpu_timing_begin(void)
 {
-	fpu_timing_start = get_cycles();
+	if (!fpu_timing_on())
+		return;
+	fpu_timing_start = fpu_timing_now();
 	if (fpu_busy_until > fpu_timing_start + FPU_TIMING_MAX_BUSY * fpu_timing_clock()) {
 		fpu_busy_until = 0;
 	}
@@ -2334,7 +2373,7 @@ static void fpu_timing_begin(void)
 
 static void fpu_timing_end(int cpu, int head, int tail)
 {
-	if (!currprefs.cpu_cycle_exact || currprefs.cpu_model < 68020) {
+	if (!fpu_timing_on() || !currprefs.cpu_cycle_exact || currprefs.cpu_model < 68020) {
 		return;
 	}
 	evt_t clock = fpu_timing_clock();
@@ -2343,11 +2382,11 @@ static void fpu_timing_end(int cpu, int head, int tail)
 	if (after > release) {
 		release = after;
 	}
-	evt_t now = get_cycles();
+	evt_t now = fpu_timing_now();
 	if (release > now) {
 		x_do_cycles((int)(release - now));
 	}
-	fpu_busy_until = get_cycles() + tail * clock;
+	fpu_busy_until = fpu_timing_now() + tail * clock;
 }
 
 // Wait for the FPU, then hold the CPU for cpu clocks: instructions that use
@@ -2447,6 +2486,9 @@ static void fpu_timing_arithmetic(uae_u32 opcode, uae_u16 extra)
 			if (dn && fpu_6888x()) {
 				cpu -= 5;
 			}
+			if (opclass == 2 && !dn && fpu_6888x()) {
+				cpu += fpu_mem_ld_clocks * fpu_timing_longs(extra);
+			}
 			fpu_timing_end(cpu, head, tail);
 			return;
 		}
@@ -2467,6 +2509,8 @@ static void fpu_timing_arithmetic(uae_u32 opcode, uae_u16 extra)
 				}
 				if (dn) {
 					cpu -= 2;
+				} else {
+					cpu += fpu_mem_st_clocks * fpu_timing_longs(extra);
 				}
 			}
 			fpu_timing_sync(cpu);
@@ -2517,6 +2561,7 @@ static void fpu_timing_arithmetic(uae_u32 opcode, uae_u16 extra)
 				if (fpu_model == 68882) {
 					cpu += 2;
 				}
+				cpu += 3 * n * ((extra & 0x2000) ? fpu_mem_st_clocks : fpu_mem_ld_clocks);
 				fpu_timing_end(cpu, 6, 0);
 			}
 			return;
@@ -2535,6 +2580,8 @@ static void fpu_timing_save_restore(bool restore, bool idle)
 	if (idle) {
 		cpu += currprefs.fpu_model == 68882 ? 84 : 36;
 	}
+	/* the frame's long words: an idle 68882 frame is 60 bytes, a 68881 one 32 */
+	cpu += (idle ? (currprefs.fpu_model == 68882 ? 15 : 8) : 1) * (restore ? fpu_mem_ld_clocks : fpu_mem_st_clocks);
 	fpu_timing_sync(cpu);
 }
 

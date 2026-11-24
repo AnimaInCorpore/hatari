@@ -104,6 +104,15 @@ static struct mmufastcache030 atc_data_cache_read[MMUFASTCACHE_ENTRIES030];
 static struct mmufastcache030 atc_data_cache_write[MMUFASTCACHE_ENTRIES030];
 #endif
 
+/* The data and instruction page caches in front of the ATC are emulator
+ * shortcuts: they keep up to 256 translations the 22-entry ATC has already
+ * replaced, so an access the 68030 would walk the tables for hits them for
+ * free (and the instruction one reads memory without the cycle-exact bus).
+ * Off in cycle-exact mode, where every ATC miss walks as on the chip
+ * (f030probe: a walk costs about 70 cycles on a Falcon, 2026-11-24). */
+static bool mmu030_fast = true;
+extern int mmu030_walk_clocks, mmu030_pflush_clocks, mmu030_faultb_clocks;	/* (below, with the walk) */
+
 /* for debugging messages */
 static char table_letter[4] = {'A','B','C','D'};
 
@@ -573,6 +582,9 @@ bool mmu_op30_pflush (uaecptr pc, uae_u32 opcode, uae_u16 next, uaecptr extra)
             write_log(_T("PFLUSH %04x-%04x ERROR: bad mode! (%i)\n"), opcode, next, mode);
 			return true;
     }
+	/* (f030probe: PFLUSHA takes 14.8 cycles more than the loop on a Falcon) */
+	if (mmu030_pflush_clocks)
+		x_do_cycles(mmu030_pflush_clocks * cpucycleunit);
 	return false;
 }
 
@@ -1044,12 +1056,26 @@ static void desc_put_long(uaecptr addr, uae_u32 v)
 {
 	x_phys_put_long(addr, v);
 }
+/* The table search's own clocks per descriptor fetched, on top of the
+ * bus read: a 4-level walk costs 70.5 cycles on a Falcon (f030probe
+ * mmu.own.walk.rd, 2026-11-24) where the reads alone came to 26.7.
+ * Cycle-exact mode only; HATARI_F030_MMU=walk,pflush,faultb overrides. */
+int mmu030_walk_clocks;
+int mmu030_pflush_clocks;
+int mmu030_faultb_clocks;	/* extra clocks of a long (format $B) bus-fault frame, fitted */
+static void desc_walk_cost(void)
+{
+	if (mmu030_walk_clocks)
+		x_do_cycles(mmu030_walk_clocks * cpucycleunit);
+}
 static uae_u32 desc_get_long(uaecptr addr)
 {
+	desc_walk_cost();
 	return x_phys_get_long(addr);
 }
 static void desc_get_quad(uaecptr addr, uae_u32 *descr)
 {
+	desc_walk_cost();
 	descr[0] = x_phys_get_long(addr);
 	descr[1] = x_phys_get_long(addr + 4);
 }
@@ -2133,7 +2159,7 @@ void mmu030_put_long(uaecptr addr, uae_u32 val, uae_u32 fc)
 #if MMU_DPAGECACHE030
 		uae_u32 idx1 = ((addr & mmu030.translation.page.imask) >> mmu030.translation.page.size3m) | fc;
 		uae_u32 idx2 = idx1 & (MMUFASTCACHE_ENTRIES030 - 1);
-		if (atc_data_cache_write[idx2].log == idx1) {
+		if (mmu030_fast && atc_data_cache_write[idx2].log == idx1) {
 			addr = atc_data_cache_write[idx2].phys | (addr & mmu030.translation.page.mask);
 			mmu030_cache_state = atc_data_cache_write[idx2].cs;
 		} else
@@ -2159,7 +2185,7 @@ void mmu030_put_word(uaecptr addr, uae_u16 val, uae_u32 fc)
 #if MMU_DPAGECACHE030
 		uae_u32 idx1 = ((addr & mmu030.translation.page.imask) >> mmu030.translation.page.size3m) | fc;
 		uae_u32 idx2 = idx1 & (MMUFASTCACHE_ENTRIES030 - 1);
-		if (atc_data_cache_write[idx2].log == idx1) {
+		if (mmu030_fast && atc_data_cache_write[idx2].log == idx1) {
 			addr = atc_data_cache_write[idx2].phys | (addr & mmu030.translation.page.mask);
 			mmu030_cache_state = atc_data_cache_write[idx2].cs;
 		} else
@@ -2185,7 +2211,7 @@ void mmu030_put_byte(uaecptr addr, uae_u8 val, uae_u32 fc)
 #if MMU_DPAGECACHE030
 		uae_u32 idx1 = ((addr & mmu030.translation.page.imask) >> mmu030.translation.page.size3m) | fc;
 		uae_u32 idx2 = idx1 & (MMUFASTCACHE_ENTRIES030 - 1);
-		if (atc_data_cache_write[idx2].log == idx1) {
+		if (mmu030_fast && atc_data_cache_write[idx2].log == idx1) {
 			addr = atc_data_cache_write[idx2].phys | (addr & mmu030.translation.page.mask);
 			mmu030_cache_state = atc_data_cache_write[idx2].cs;
 		} else
@@ -2212,7 +2238,7 @@ uae_u32 mmu030_get_long(uaecptr addr, uae_u32 fc)
 #if MMU_DPAGECACHE030
 		uae_u32 idx1 = ((addr & mmu030.translation.page.imask) >> mmu030.translation.page.size3m) | fc;
 		uae_u32 idx2 = idx1 & (MMUFASTCACHE_ENTRIES030 - 1);
-		if (atc_data_cache_read[idx2].log == idx1) {
+		if (mmu030_fast && atc_data_cache_read[idx2].log == idx1) {
 			addr = atc_data_cache_read[idx2].phys | (addr & mmu030.translation.page.mask);
 			mmu030_cache_state = atc_data_cache_read[idx2].cs;
 		} else
@@ -2239,7 +2265,7 @@ uae_u16 mmu030_get_word(uaecptr addr, uae_u32 fc)
 #if MMU_DPAGECACHE030
 		uae_u32 idx1 = ((addr & mmu030.translation.page.imask) >> mmu030.translation.page.size3m) | fc;
 		uae_u32 idx2 = idx1 & (MMUFASTCACHE_ENTRIES030 - 1);
-		if (atc_data_cache_read[idx2].log == idx1) {
+		if (mmu030_fast && atc_data_cache_read[idx2].log == idx1) {
 			addr = atc_data_cache_read[idx2].phys | (addr & mmu030.translation.page.mask);
 			mmu030_cache_state = atc_data_cache_read[idx2].cs;
 		} else
@@ -2266,7 +2292,7 @@ uae_u8 mmu030_get_byte(uaecptr addr, uae_u32 fc)
 #if MMU_DPAGECACHE030
 		uae_u32 idx1 = ((addr & mmu030.translation.page.imask) >> mmu030.translation.page.size3m) | fc;
 		uae_u32 idx2 = idx1 & (MMUFASTCACHE_ENTRIES030 - 1);
-		if (atc_data_cache_read[idx2].log == idx1) {
+		if (mmu030_fast && atc_data_cache_read[idx2].log == idx1) {
 			addr = atc_data_cache_read[idx2].phys | (addr & mmu030.translation.page.mask);
 			mmu030_cache_state = atc_data_cache_read[idx2].cs;
 		} else
@@ -2291,7 +2317,7 @@ uae_u32 mmu030_get_ilong(uaecptr addr, uae_u32 fc)
 {
 	uae_u32 v;
 #if MMU_IPAGECACHE030
-	if (((addr & mmu030.translation.page.imask) | fc) == mmu030.mmu030_last_logical_address) {
+	if (mmu030_fast && ((addr & mmu030.translation.page.imask) | fc) == mmu030.mmu030_last_logical_address) {
 #if MMU_DIRECT_ACCESS
 		uae_u8 *p = &mmu030.mmu030_last_physical_address_real[addr & mmu030.translation.page.mask];
 		return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | (p[3]);
@@ -2323,7 +2349,7 @@ uae_u16 mmu030_get_iword(uaecptr addr, uae_u32 fc)
 {
 	uae_u16 v;
 #if MMU_IPAGECACHE030
-	if (((addr & mmu030.translation.page.imask) | fc) == mmu030.mmu030_last_logical_address) {
+	if (mmu030_fast && ((addr & mmu030.translation.page.imask) | fc) == mmu030.mmu030_last_logical_address) {
 #if MMU_DIRECT_ACCESS
 		uae_u8 *p = &mmu030.mmu030_last_physical_address_real[addr & mmu030.translation.page.mask];
 		return (p[0] << 8) | p[1];
@@ -2724,6 +2750,16 @@ void mmu030_set_funcs(void)
 {
 	if (currprefs.mmu_model != 68030)
 		return;
+	mmu030_fast = !currprefs.cpu_memory_cycle_exact;
+	mmu030_walk_clocks = mmu030_pflush_clocks = mmu030_faultb_clocks = 0;
+	if (currprefs.cpu_memory_cycle_exact) {
+		const char *env = getenv("HATARI_F030_MMU");
+		mmu030_walk_clocks = 10;
+		mmu030_pflush_clocks = 14;
+		mmu030_faultb_clocks = 166;
+		if (env)
+			sscanf(env, "%d,%d,%d", &mmu030_walk_clocks, &mmu030_pflush_clocks, &mmu030_faultb_clocks);
+	}
 	if (currprefs.cpu_memory_cycle_exact) {
 		x_phys_get_iword = mem_access_delay_wordi_read_ce020;
 		x_phys_get_ilong = mem_access_delay_longi_read_ce020;

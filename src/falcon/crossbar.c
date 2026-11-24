@@ -1374,6 +1374,27 @@ static int Crossbar_DetectSampleRate(uint16_t clock)
 }
 
 /**
+ * The bytes per second DMA sound playback and record move through ST-RAM
+ * (0 when both are idle): the 68030 bus model charges its accesses for them
+ * (cpu030_timing.c; f030probe section 8, 2026-11-24).
+ */
+uint32_t Crossbar_DmaByteRate(void)
+{
+	uint32_t rate = 0;
+	int clock = crossbar.dmaPlay_freq == CROSSBAR_FREQ_32MHZ ? 32 : 25;
+
+	if (!dmaPlay.isRunning && !dmaRecord.isRunning)
+		return 0;
+	if (dmaPlay.isRunning)
+		rate += Crossbar_DetectSampleRate(clock) * crossbar.playTracks
+		        * (crossbar.isStereo ? 2 : 1) * (crossbar.is16Bits ? 2 : 1);
+	if (dmaRecord.isRunning)
+		rate += Crossbar_DetectSampleRate(clock) * crossbar.recordTracks
+		        * (crossbar.isStereo ? 2 : 1) * (crossbar.is16Bits ? 2 : 1);
+	return rate;
+}
+
+/**
  * Start internal 25 Mhz clock interrupt.
  */
 static void Crossbar_Start_InterruptHandler_25Mhz(void)

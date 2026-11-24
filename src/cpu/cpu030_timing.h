@@ -53,5 +53,6 @@ int cpu030t_stram_lw_clocks(void);
 void cpu030t_init(void);
 void cpu030t_access(uaecptr addr, evt_t start, evt_t end, bool write);
 void cpu030t_instruction_end(uae_u16 opcode, uaecptr instruction_pc);
+void cpu030t_abort(void);
 
 #endif

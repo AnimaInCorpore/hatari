@@ -33,6 +33,7 @@
 #include "configuration.h"
 #include "cpu030_timing.h"
 #include "stMemory.h"
+#include "crossbar.h"
 
 bool cpu030t_enabled;
 int cpu030t_stram_long_write;
@@ -65,10 +66,29 @@ static int bx_st_pre = 1;
 static int bx_rom_w = 2, bx_rom_l = 4;
 int cpu030t_bus_pre;			/* ST-RAM extras go before the bus-slot alignment */
 
+/* DMA sound steals from the 68030's ST-RAM accesses in proportion to its
+ * byte rate. f030probe section 8 (2026-11-24), 8-bit and 16-bit stereo at
+ * 49170 Hz (98 / 197 KB/s): a long read 0.24 / 0.48 clocks dearer, a long
+ * write 0.24 / 0.40, a word read 0.16 / 0.32, a word write 0.08 / 0.16.
+ * Clocks per access per byte/s, in 2^-32, per class (BX_RD, BX_RDL, BX_WR,
+ * BX_LW: a long write's wait between its halves), refitted on the slot grid
+ * (mean error 0.10 clocks an access).  They go into the same eighths as the
+ * fixed extras: charged on their own, a whole clock now and then, the 4-clock
+ * slot grid swallowed them.  HATARI_F030_SND=off drops it, =a,b,c,d refits. */
+static uae_u32 bx_snd_q32[BX_NCLASS] = { 2500, 12000, 3000, 5000 };
+static uae_u64 bx_snd_acc[BX_NCLASS];
+static bool bx_snd_on = true;
+static uae_u32 bx_snd_rate;		/* bytes/s, sampled per access */
+
 static int bx_take(int cls)
 {
 	int n;
 
+	if (bx_snd_rate) {
+		bx_snd_acc[cls] += (uae_u64)bx_snd_q32[cls] * bx_snd_rate * 8;
+		bx_acc[cls] += (int)(bx_snd_acc[cls] >> 32);
+		bx_snd_acc[cls] &= 0xffffffffULL;
+	}
 	bx_acc[cls] += bx_st8[cls];
 	n = bx_acc[cls] >> 3;
 	bx_acc[cls] &= 7;
@@ -139,6 +159,7 @@ int cpu030t_bus_pre_extra(uaecptr addr, int size, bool write)
 	a = addr & 0x00ffffff;
 	if (a >= STRamEnd)
 		return 0;
+	bx_snd_rate = bx_snd_on ? Crossbar_DmaByteRate() : 0;
 	return bx_st(size, write);
 }
 
@@ -160,6 +181,11 @@ static void bus_init(void)
 		sscanf(env, "%d,%d,%d,%d,%d", &bx_st8[BX_RD], &bx_st8[BX_RDL], &bx_st8[BX_WR],
 		       &bx_st8[BX_LW], &bx_st_pre);
 	memset(bx_acc, 0, sizeof bx_acc);
+	env = getenv("HATARI_F030_SND");
+	bx_snd_on = !(env && strcmp(env, "off") == 0);
+	if (env && bx_snd_on)
+		sscanf(env, "%u,%u,%u,%u", &bx_snd_q32[0], &bx_snd_q32[1], &bx_snd_q32[2], &bx_snd_q32[3]);
+	memset(bx_snd_acc, 0, sizeof bx_snd_acc);
 	cpu030t_bus_pre = bx_st_pre;
 	cpu030t_bus_on = true;
 	Log_Printf(LOG_INFO, "Falcon bus: f030probe-measured extras on (ST-RAM read +%d/8, long read +%d/8, write +%d/8%s, long write halves +%d/8 clocks; ROM, I/O per device); HATARI_F030_BUS=off disables\n",
@@ -366,9 +392,10 @@ void cpu030t_init(void)
 	asked = env && strcmp(env, "manual") == 0;
 	if (!asked && !Config_IsMachineFalcon())
 		return;
-	if (currprefs.cpu_model != 68030 || !currprefs.cpu_cycle_exact || currprefs.mmu_model) {
+	/* (with --mmu too since 2026-11-24: m68k_run_mmu030 calls the same hooks) */
+	if (currprefs.cpu_model != 68030 || !currprefs.cpu_cycle_exact) {
 		if (asked)
-			Log_Printf(LOG_WARN, "HATARI_CPU030_TIMING=manual needs a 68030 in cycle-exact mode without MMU; ignored\n");
+			Log_Printf(LOG_WARN, "HATARI_CPU030_TIMING=manual needs a 68030 in cycle-exact mode; ignored\n");
 		return;
 	}
 	if (!model)
@@ -417,6 +444,16 @@ void cpu030t_access(uaecptr addr, evt_t start, evt_t end, bool write)
 	} else {
 		wait_read += w;
 	}
+}
+
+/* An instruction an MMU fault cut short: its accesses do not carry into the
+ * exception handler's first instruction, and nothing overlaps across it. */
+void cpu030t_abort(void)
+{
+	wait_read = wait_write = wait_last_write = 0;
+	wrote = false;
+	io_touched = false;
+	tail_prev = 0;
 }
 
 void cpu030t_instruction_end(uae_u16 opcode, uaecptr instruction_pc)

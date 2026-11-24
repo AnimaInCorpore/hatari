@@ -24,6 +24,7 @@ extern uint16_t nCbar_DmaSoundControl;
 
 /* Called by audio.c */
 void Crossbar_Compute_Ratio(void);
+uint32_t Crossbar_DmaByteRate(void);
 
 /* Called by mfp.c */
 extern void Crossbar_GenerateSamples(int nMixBufIdx, int nSamplesToGenerate);

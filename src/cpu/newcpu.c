@@ -3304,6 +3304,11 @@ static void Exception_mmu030 (int nr, uaecptr oldpc)
 			Exception_build_stack_frame(oldpc, currpc, regs.mmu_ssw, vector_nr, 0xA);
 		} else {
 			Exception_build_stack_frame(oldpc, currpc, regs.mmu_ssw, vector_nr, 0xB);
+			/* A long-frame fault's round trip is 268 cycles dearer than a
+			 * short-frame one on a Falcon, 50 here: fitted, the mechanism
+			 * is not identified (f030probe mmu.own.flt.*, 2026-11-24) */
+			if (currprefs.cpu_cycle_exact && mmu030_faultb_clocks)
+				x_do_cycles(mmu030_faultb_clocks * cpucycleunit);
 		}
 	} else if (nr == 3) {
 		regs.mmu_fault_addr = last_fault_for_exception_3;
@@ -6620,6 +6625,7 @@ static void m68k_run_mmu030 (void)
 		CpuRunFuncNoret = true;
 	}
 #endif
+	cpu030t_init();		/* (it stays off unless cycle-exact) */
 
 	mmu030_opcode_stageb = -1;
 	mmu030_fake_prefetch = -1;
@@ -6706,6 +6712,9 @@ insretry:
 				}
 
 				mmu030_opcode = -1;
+				/* the MC68030 manual model, as in m68k_run_2ce (2026-11-24) */
+				if (currprefs.cpu_cycle_exact && cpu030t_enabled)
+					cpu030t_instruction_end(regs.opcode, regs.instruction_pc);
 
 				if (!currprefs.cpu_cycle_exact) {
 
@@ -6748,8 +6757,12 @@ insretry:
 #ifdef WINUAE_FOR_HATARI
 //fprintf ( stderr, "cyc_2ce %d\n" , currcycle );
 					/* Flush all CE cycles so far to update PendingInterruptCount */
-					M68000_AddCycles_CE ( currcycle * 2 / CYCLE_UNIT );
-					int dsp_cycles = 2 * currcycle * 2 / CYCLE_UNIT;	// FIXME : remove this when using DSP_CyclesGlobalClockCounter in DSP_Run
+					/* (the Blitter overlap as in m68k_run_2ce) */
+					int instr_cycles = currcycle * 2 / CYCLE_UNIT;
+					if ( Blitter_CPU030_Active )
+						instr_cycles = Blitter_CPU030_InstrEnd ( instr_cycles );
+					M68000_AddCycles_CE ( instr_cycles );
+					int dsp_cycles = 2 * instr_cycles;	// FIXME : remove this when using DSP_CyclesGlobalClockCounter in DSP_Run
 					currcycle = 0;
 
 					/* We can have several interrupts at the same time before the next CPU instruction */
@@ -6814,11 +6827,24 @@ insretry:
 
 			m68k_setpci (regs.instruction_pc);
 
+			if (currprefs.cpu_cycle_exact && cpu030t_enabled)
+				cpu030t_abort();
 			TRY (prb2) {
 				Exception (prb);
 			} CATCH (prb2) {
 				halt = 1;
 			} ENDTRY
+#ifdef WINUAE_FOR_HATARI
+			/* The faulting instruction's cycles (its table walk included)
+			 * and the exception's own: the next instruction starts with
+			 * currcycle = 0, so without this a fault took no time at all
+			 * (f030probe: a fault round trip is 788 cycles on a Falcon,
+			 * Hatari charged 119; 2026-11-24) */
+			if (currprefs.cpu_cycle_exact) {
+				M68000_AddCycles_CE ( currcycle * 2 / CYCLE_UNIT );
+				currcycle = 0;
+			}
+#endif
 		} ENDTRY
 	}
 	cpu_halt (halt);
